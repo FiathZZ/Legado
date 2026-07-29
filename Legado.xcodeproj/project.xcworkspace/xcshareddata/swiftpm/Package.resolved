@@ -1,0 +1,24 @@
+{
+  "originHash" : "496febcddfd517f23f9951392bce6964d8df80226ba0a1b0bdc21b2bb6f2ac43",
+  "pins" : [
+    {
+      "identity" : "gcdwebserver",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/yene/GCDWebServer.git",
+      "state" : {
+        "revision" : "c2f837b30038ef716b77225f40cc8d104b6ff645",
+        "version" : "3.5.7"
+      }
+    },
+    {
+      "identity" : "swiftsoup",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/scinfu/SwiftSoup.git",
+      "state" : {
+        "revision" : "6c7915e16f729857aec3e99068c361e58a00ed68",
+        "version" : "2.13.4"
+      }
+    }
+  ],
+  "version" : 3
+}

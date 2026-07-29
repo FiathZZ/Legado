@@ -1,0 +1,18 @@
+legado/
+书源.json
+.DS_Store
+swiftLegado.xcodeproj/project.xcworkspace/xcuserdata/songming.xcuserdatad/UserInterfaceState.xcuserstate
+
+# CocoaPods dependencies are restored from Podfile.lock.
+Pods/
+
+# Local source-comparison tooling; keep it out of the public repository.
+scripts/
+
+# Xcode build artifacts and per-user workspace state.
+DerivedData/
+build/
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint

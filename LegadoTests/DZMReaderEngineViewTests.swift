@@ -4,6 +4,50 @@ import SwiftUI
 
 @MainActor
 final class DZMReaderEngineViewTests: XCTestCase {
+    func testMenuChapterTitleUsesTheCurrentNativeRecord() {
+        XCTAssertEqual(
+            DZMReaderChapterTitleResolver.resolve(
+                snapshotTitle: "第一章",
+                recordChapterTitle: "第二章"
+            ),
+            "第二章"
+        )
+        XCTAssertEqual(
+            DZMReaderChapterTitleResolver.resolve(
+                snapshotTitle: "第一章",
+                recordChapterTitle: "  "
+            ),
+            "第一章"
+        )
+    }
+
+    func testContinuousScrollPrefetchesNextChapterWhenControllerLoads() async {
+        let providerCalled = expectation(description: "next chapter prefetched")
+        let snapshot = DZMNativeReaderSnapshot(
+            bookID: "prefetch-book-\(UUID().uuidString)",
+            bookName: "测试书",
+            chapters: ["第一章", "第二章"],
+            chapterIndex: 0,
+            chapterTitle: "第一章",
+            content: "第一章正文",
+            restoredPosition: ReaderPosition(chapterIndex: 0)
+        )
+        let model = DZMNativeReadModelFactory.makeModel(from: snapshot) { index, completion in
+            XCTAssertEqual(index, 1)
+            providerCalled.fulfill()
+            completion("第二章正文")
+        }
+        let previousEffectIndex = DZMReadConfigure.shared().effectIndex
+        defer { DZMReadConfigure.shared().effectIndex = previousEffectIndex }
+        DZMReadConfigure.shared().effectIndex = NSNumber(value: DZMEffectType.scroll.rawValue)
+
+        let controller = DZMReadController()
+        controller.readModel = model
+        controller.loadViewIfNeeded()
+
+        await fulfillment(of: [providerCalled], timeout: 1)
+    }
+
     func testContinuousScrollNextChapterDoesNotBlockMainActorProvider() async {
         let providerCalled = expectation(description: "remote chapter provider called")
         let chapterDelivered = expectation(description: "remote chapter delivered")

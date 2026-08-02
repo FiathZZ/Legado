@@ -1728,6 +1728,42 @@ final class Phase13ParserParityTests: XCTestCase {
         XCTAssertEqual(values, ["第一段", "第二段"])
     }
 
+    func testCSSParserLegacyIDChainSurvivesMalformedDetailHTML() throws {
+        let noise = (0..<600).map { index in
+            "<div class='row'><span>\(index)</span><p>干扰内容 \(index)</div>"
+        }.joined()
+        let html = """
+        <html><body>
+          \(noise)
+          <div id="intro"><p>目标简介</p><p>第二段</div>
+        </body></html>
+        """
+
+        for _ in 0..<100 {
+            let values = try CSSParser.getStringListTraversing(
+                from: html,
+                rule: "id.intro.0@tag.p.0@text"
+            )
+            XCTAssertEqual(values, ["目标简介"])
+        }
+    }
+
+    func testCSSParserLegacyIDChainUsesFirstDuplicateInDocumentOrder() throws {
+        let html = """
+        <html><body>
+          <section><div id="intro"><p>第一个简介</p></div></section>
+          <div id="intro"><p>第二个简介</p></div>
+        </body></html>
+        """
+
+        let values = try CSSParser.getStringListTraversing(
+            from: html,
+            rule: "id.intro.0@tag.p.0@text"
+        )
+
+        XCTAssertEqual(values, ["第一个简介"])
+    }
+
     func testCSSParserBracketRangeSupportsInclusiveEndAndReverseOrder() throws {
         let html = """
         <html>

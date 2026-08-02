@@ -1,6 +1,6 @@
 # Legado
 
-Legado是一个面向iOS的小说阅读器实验项目，目标是将Android开源阅读器[legado（阅读）](https://github.com/gedoor/legado)的书源生态移植到Apple平台，让同一套社区书源规则可以用于搜索、详情、目录、正文阅读与离线缓存。
+Legado是一个面向iOS的小说阅读器实验项目，目标是将Android开源阅读器[legado（阅读）](https://github.com/gedoor/legado)的书源生态移植到Apple平台，让同一套社区书源规则可以用于搜索、详情、目录、正文阅读与离线缓存。iOS27正常运行
 
 # 本APP只做阅读器
 

@@ -2,6 +2,37 @@ import XCTest
 @testable import Legado
 
 final class MemoryLeakSearchChangeSourceTests: XCTestCase {
+    func testAlamofireSessionCreationGateRejectsTaskSetupAfterShutdown() {
+        let gate = AlamofireRequestCreationGate()
+        let setupStarted = expectation(description: "request setup started")
+        let releaseSetup = DispatchSemaphore(value: 0)
+        let shutdownFinished = expectation(description: "shutdown finished")
+
+        DispatchQueue.global(qos: .utility).async {
+            _ = gate.withRequestCreation {
+                setupStarted.fulfill()
+                releaseSetup.wait()
+                return true
+            }
+        }
+
+        wait(for: [setupStarted], timeout: 1)
+
+        DispatchQueue.global(qos: .utility).async {
+            gate.shutdown()
+            shutdownFinished.fulfill()
+        }
+
+        XCTAssertFalse(
+            XCTWaiter().wait(for: [shutdownFinished], timeout: 0.05) == .completed,
+            "shutdown 不能抢在正在进行的 session task 创建之前"
+        )
+
+        releaseSetup.signal()
+        wait(for: [shutdownFinished], timeout: 1)
+        XCTAssertNil(gate.withRequestCreation { true })
+    }
+
     private static let keyword = "遮天"
     private static let author = "辰东"
 
@@ -33,7 +64,7 @@ final class MemoryLeakSearchChangeSourceTests: XCTestCase {
         let startedAt = clock.now
 
         do {
-            _ = try await SourceSearchDeadline.run(seconds: 0) {
+            _ = try await SourceOperationDeadline.run(seconds: 0) {
                 await withCheckedContinuation { continuation in
                     DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
                         continuation.resume()
@@ -53,7 +84,7 @@ final class MemoryLeakSearchChangeSourceTests: XCTestCase {
 
     @MainActor
     func testSourceSearchDeadlineRunsOperationAwayFromMainThread() async throws {
-        let ranOnMainThread = try await SourceSearchDeadline.run(seconds: 1) {
+        let ranOnMainThread = try await SourceOperationDeadline.run(seconds: 1) {
             Thread.isMainThread
         }
 
@@ -102,6 +133,80 @@ final class MemoryLeakSearchChangeSourceTests: XCTestCase {
         XCTAssertFalse(viewModel.isSearching)
         XCTAssertEqual(viewModel.results.map(\.bookUrl), [publishedResult.bookUrl])
         XCTAssertNil(viewModel.errorMessage)
+    }
+
+    @MainActor
+    func testChangeSourceSearchWithoutCandidateRestrictionUsesAllEnabledSources() {
+        let current = BookSource(
+            bookSourceName: "当前源",
+            bookSourceUrl: "https://current.example",
+            searchUrl: "/search?q={{key}}"
+        )
+        let alternative = BookSource(
+            bookSourceName: "备用源",
+            bookSourceUrl: "https://alternative.example",
+            searchUrl: "/search?q={{key}}"
+        )
+
+        let viewModel = ChangeSourceViewModel(
+            bookName: "遮天",
+            bookAuthor: "辰东",
+            allSources: [current, alternative],
+            currentSourceURL: current.bookSourceUrl,
+            currentSourceName: current.bookSourceName
+        )
+
+        XCTAssertEqual(
+            viewModel.searchableSourceURLs,
+            [alternative.bookSourceUrl],
+            "换源搜索不能被本次搜索结果的书源集合限制"
+        )
+    }
+
+    @MainActor
+    func testChangeSourceKeepsMergedSearchOriginsAsImmediateCandidates() {
+        let current = BookSource(
+            bookSourceName: "当前源",
+            bookSourceUrl: "https://current.example",
+            searchUrl: "/search?q={{key}}"
+        )
+        let alternative = BookSource(
+            bookSourceName: "备用源",
+            bookSourceUrl: "https://alternative.example",
+            searchUrl: "/search?q={{key}}"
+        )
+        let prefetched = SearchBook(
+            bookUrl: "/book/current",
+            name: "遮天",
+            author: "辰东",
+            origin: current.bookSourceUrl,
+            sourceName: current.bookSourceName,
+            sourceOrigins: [
+                SearchBookOrigin(
+                    url: current.bookSourceUrl,
+                    name: current.bookSourceName,
+                    bookUrl: "/book/current"
+                ),
+                SearchBookOrigin(
+                    url: alternative.bookSourceUrl,
+                    name: alternative.bookSourceName,
+                    bookUrl: "/book/alternative"
+                )
+            ]
+        )
+
+        let viewModel = ChangeSourceViewModel(
+            bookName: prefetched.name,
+            bookAuthor: prefetched.author,
+            allSources: [current, alternative],
+            prefetchedBook: prefetched,
+            currentSourceURL: current.bookSourceUrl,
+            currentSourceName: current.bookSourceName
+        )
+
+        XCTAssertEqual(viewModel.results.count, 1)
+        XCTAssertEqual(viewModel.results.first?.source.bookSourceUrl, alternative.bookSourceUrl)
+        XCTAssertEqual(viewModel.results.first?.searchBook.bookUrl, "/book/alternative")
     }
 
     @MainActor

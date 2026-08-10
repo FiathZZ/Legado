@@ -2,6 +2,10 @@ import XCTest
 @testable import Legado
 
 final class SearchMatchModeTests: XCTestCase {
+    func testDefaultSearchModeMatchesAndroidNonPrecisionSearch() {
+        XCTAssertEqual(SearchMatchMode.defaultValue, .contains)
+    }
+
     func testExactSearchOnlyMatchesTheCompleteBookName() {
         let exact = SearchBook(name: "青山")
         let longerTitle = SearchBook(name: "青山镇")

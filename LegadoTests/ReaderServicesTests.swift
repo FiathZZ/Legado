@@ -430,6 +430,23 @@ final class ReaderServicesTests: XCTestCase {
         UserDefaults.standard.removeObject(forKey: "reader.progress.position.\(bookURL)")
     }
 
+    @MainActor
+    func testProgressSaveCoordinatorFlushLatestPersistsPositionBeforeNavigation() {
+        let coordinator = ReaderProgressSaveCoordinator(interval: .seconds(60))
+        let scheduled = ReaderPosition(chapterIndex: 2, pageIndex: 5, utf16Offset: 960)
+        let fallback = ReaderPosition(chapterIndex: 1, pageIndex: 3, utf16Offset: 480)
+        var savedPosition: ReaderPosition?
+
+        coordinator.schedule(position: scheduled) { _ in
+            XCTFail("A scheduled save must be cancelled when leaving the reader")
+        }
+        coordinator.flushLatest(position: fallback) { position in
+            savedPosition = position
+        }
+
+        XCTAssertEqual(savedPosition, fallback)
+    }
+
     func testLayoutConfigurationNormalizesBodyIndentation() {
         let configuration = ReaderLayoutConfiguration(
             viewportSize: CGSize(width: 320, height: 480),

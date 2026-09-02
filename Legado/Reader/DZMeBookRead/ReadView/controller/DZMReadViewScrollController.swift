@@ -81,6 +81,8 @@ class DZMReadViewScrollController: DZMViewController,UITableViewDelegate,UITable
         tableView.dataSource = self
         tableView.showsVerticalScrollIndicator = false
         tableView.showsHorizontalScrollIndicator = false
+        // A status-bar tap must not move the reader to page one and overwrite the saved position.
+        tableView.scrollsToTop = false
         tableView.separatorStyle = .none
         view.addSubview(tableView)
         tableView.frame = DZM_READ_VIEW_RECT

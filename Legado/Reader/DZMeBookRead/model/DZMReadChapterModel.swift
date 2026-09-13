@@ -43,6 +43,11 @@ class DZMReadChapterModel: NSObject,NSCoding {
     /// Identifies the text canvas and typography used to create `pageModels`.
     /// Cached pages are only safe to reuse when this matches the current reader layout.
     var paginationSignature:String?
+
+    /// Stable fingerprint of the unformatted chapter text used to build this pagination cache.
+    /// Keeping this separately lets the reader validate an archive without typesetting the
+    /// entire chapter again during startup.
+    var sourceContentSignature:String?
     
     
     // MARK: 快捷获取
@@ -223,6 +228,8 @@ class DZMReadChapterModel: NSObject,NSCoding {
         pageModels = aDecoder.decodeObject(forKey: "pageModels") as? [DZMReadPageModel]
 
         paginationSignature = aDecoder.decodeObject(forKey: "paginationSignature") as? String
+
+        sourceContentSignature = aDecoder.decodeObject(forKey: "sourceContentSignature") as? String
         
         attributes = aDecoder.decodeObject(forKey: "attributes") as? [NSAttributedString.Key:Any]
     }
@@ -250,6 +257,8 @@ class DZMReadChapterModel: NSObject,NSCoding {
         aCoder.encode(pageModels, forKey: "pageModels")
 
         aCoder.encode(paginationSignature, forKey: "paginationSignature")
+
+        aCoder.encode(sourceContentSignature, forKey: "sourceContentSignature")
         
         aCoder.encode(attributes, forKey: "attributes")
     }

@@ -105,6 +105,8 @@ final class DZMNativeReaderHostController: UIViewController {
     private var onChapterRequested: (Int) -> Void = { _ in }
     private var onReadingPositionChanged: (ReaderPosition, Bool) -> Void = { _, _ in }
     private var backgroundObserver: NSObjectProtocol?
+    private weak var gestureNavigationController: UINavigationController?
+    private var previousInteractivePopGestureState: Bool?
     private var onCacheEntireBook: () -> Void = {}
     private var cacheState: ReaderBookCacheState = .available
     private var chapterContentProvider: (Int, @escaping (String?) -> Void) -> Void = { _, completion in
@@ -126,9 +128,20 @@ final class DZMNativeReaderHostController: UIViewController {
     }
 
     deinit {
+        restoreInteractivePopGesture()
         if let backgroundObserver {
             NotificationCenter.default.removeObserver(backgroundObserver)
         }
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        disableInteractivePopGesture()
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        restoreInteractivePopGesture()
     }
 
     override func viewDidLayoutSubviews() {
@@ -201,6 +214,42 @@ final class DZMNativeReaderHostController: UIViewController {
 
     private func updateLayoutMetrics() -> Bool {
         DZMReadLayoutMetrics.update(bounds: view.bounds, safeAreaInsets: view.safeAreaInsets)
+    }
+
+    private func disableInteractivePopGesture() {
+        guard let navigationController = containingNavigationController(),
+              let gesture = navigationController.interactivePopGestureRecognizer else {
+            return
+        }
+        gestureNavigationController = navigationController
+        if previousInteractivePopGestureState == nil {
+            previousInteractivePopGestureState = gesture.isEnabled
+        }
+        gesture.isEnabled = false
+    }
+
+    private func restoreInteractivePopGesture() {
+        guard let previousInteractivePopGestureState,
+              let gesture = gestureNavigationController?.interactivePopGestureRecognizer else {
+            return
+        }
+        gesture.isEnabled = previousInteractivePopGestureState
+        self.previousInteractivePopGestureState = nil
+        gestureNavigationController = nil
+    }
+
+    private func containingNavigationController() -> UINavigationController? {
+        var controller: UIViewController? = self
+        while let current = controller {
+            if let navigationController = current as? UINavigationController {
+                return navigationController
+            }
+            if let navigationController = current.navigationController {
+                return navigationController
+            }
+            controller = current.parent
+        }
+        return nil
     }
 
     private func replaceReader(
@@ -461,7 +510,12 @@ enum DZMNativeReadModelFactory {
             record.page = NSNumber(value: max(chapter.pageCount.intValue - 1, 0))
         }
         readModel.recordModel = record
-        readModel.save()
+        // Archiving the complete read model serializes the chapter text and every CoreText page.
+        // It is legacy persistence only; doing it synchronously here keeps the reader on the
+        // loading screen for large chapters even when pagination was already cached.
+        DispatchQueue.global(qos: .utility).async {
+            readModel.save()
+        }
         return readModel
     }
 
@@ -473,8 +527,8 @@ enum DZMNativeReadModelFactory {
         content: String,
         chapterCount: Int
     ) -> DZMReadChapterModel {
-        let formattedContent = DZM_READ_PH_SPACE + DZMReadParser.contentTypesetting(content: content)
         let paginationSignature = DZMNativeReadModelFactory.paginationSignature()
+        let sourceContentSignature = DZMNativeReadModelFactory.contentSignature(content)
 
         if DZMReadChapterModel.isExist(bookID: bookID, chapterID: chapterID),
            let cachedChapter = DZMKeyedArchiver.unarchiver(
@@ -486,12 +540,13 @@ enum DZMNativeReadModelFactory {
                title: title,
                chapterIndex: chapterIndex,
                chapterCount: chapterCount,
-               content: formattedContent,
+               sourceContentSignature: sourceContentSignature,
                paginationSignature: paginationSignature
            ) {
             return cachedChapter
         }
 
+        let formattedContent = DZM_READ_PH_SPACE + DZMReadParser.contentTypesetting(content: content)
         let chapter = DZMReadChapterModel()
         chapter.bookID = bookID
         chapter.id = chapterID
@@ -505,8 +560,32 @@ enum DZMNativeReadModelFactory {
             : DZM_READ_NO_MORE_CHAPTER
         chapter.content = formattedContent
         chapter.paginationSignature = paginationSignature
+        chapter.sourceContentSignature = sourceContentSignature
         chapter.updateFont()
         return chapter
+    }
+
+    /// Fast path for a current-format archive. The signature is calculated from the raw cached
+    /// text, so an existing pagination archive can be used without recreating its formatted
+    /// `NSAttributedString` just to compare it.
+    static func canReuseCachedPagination(
+        _ chapter: DZMReadChapterModel,
+        title: String,
+        chapterIndex: Int,
+        chapterCount: Int,
+        sourceContentSignature: String,
+        paginationSignature: String
+    ) -> Bool {
+        guard chapter.sourceContentSignature == sourceContentSignature else {
+            return false
+        }
+        return canReuseCachedPaginationMetadata(
+            chapter,
+            title: title,
+            chapterIndex: chapterIndex,
+            chapterCount: chapterCount,
+            paginationSignature: paginationSignature
+        )
     }
 
     static func canReuseCachedPagination(
@@ -517,13 +596,32 @@ enum DZMNativeReadModelFactory {
         content: String,
         paginationSignature: String
     ) -> Bool {
+        guard canReuseCachedPaginationMetadata(
+            chapter,
+            title: title,
+            chapterIndex: chapterIndex,
+            chapterCount: chapterCount,
+            paginationSignature: paginationSignature
+        ) else {
+            return false
+        }
+
+        return chapter.content == content
+    }
+
+    private static func canReuseCachedPaginationMetadata(
+        _ chapter: DZMReadChapterModel,
+        title: String,
+        chapterIndex: Int,
+        chapterCount: Int,
+        paginationSignature: String
+    ) -> Bool {
         // Older DZMe archives can omit fields that the current in-memory model always has.
         // An incomplete archive is not reusable; it must fall through to fresh pagination.
         guard let cachedBookID = chapter.bookID,
               let cachedID = chapter.id,
               let cachedName = chapter.name,
               let cachedPriority = chapter.priority,
-              let cachedContent = chapter.content,
               let cachedFullContent = chapter.fullContent,
               let cachedPageCount = chapter.pageCount,
               let cachedPageModels = chapter.pageModels,
@@ -547,7 +645,6 @@ enum DZMNativeReadModelFactory {
               Int(cachedPriority.intValue) == chapterIndex,
               matchesChapterID(cachedPreviousID, expected: expectedPreviousID),
               matchesChapterID(cachedNextID, expected: expectedNextID),
-              cachedContent == content,
               chapter.paginationSignature == paginationSignature else {
             return false
         }
@@ -570,6 +667,15 @@ enum DZMNativeReadModelFactory {
             String(configuration.fontSize.intValue),
             String(configuration.spacingIndex.intValue)
         ].joined(separator: "|")
+    }
+
+    private static func contentSignature(_ content: String) -> String {
+        var hash: UInt64 = 1_469_598_103_934_665_603
+        for byte in content.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return String(hash, radix: 16)
     }
 
     /// Uses a deterministic filename-safe ID because DZMeBookRead archives chapters by book ID.

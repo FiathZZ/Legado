@@ -62,17 +62,33 @@ final class BookTocViewModel: ObservableObject {
         }
     }
 
-    private func loadTocOnce(generation: UUID) async {
-        guard generation == tocLoadGeneration, !Task.isCancelled else { return }
-        guard chapters.isEmpty else { return }
-        if chapters.isEmpty, let cached = loadCachedChapters() {
+    /// Restores locally available TOC/body state before any network request starts.
+    @discardableResult
+    func restoreCachedChaptersIfAvailable() -> Bool {
+        guard chapters.isEmpty else { return true }
+        if let cached = loadCachedChapters() {
             chapters = cached.chapters
             syncChapterCount()
             errorMessage = nil
-
             if cached.isExpired, !LocalBookSupport.isLocalSource(source.bookSourceUrl) {
-                refreshCachedTocInBackground(generation: generation)
+                refreshCachedTocInBackground(generation: tocLoadGeneration)
             }
+            return true
+        }
+        guard let fallback = loadCachedCurrentChapterFallback() else { return false }
+        chapters = fallback
+        syncChapterCount()
+        errorMessage = nil
+        if !LocalBookSupport.isLocalSource(source.bookSourceUrl) {
+            refreshCachedTocInBackground(generation: tocLoadGeneration)
+        }
+        return true
+    }
+
+    private func loadTocOnce(generation: UUID) async {
+        guard generation == tocLoadGeneration, !Task.isCancelled else { return }
+        guard chapters.isEmpty else { return }
+        if restoreCachedChaptersIfAvailable() {
             return
         }
 
@@ -250,6 +266,33 @@ final class BookTocViewModel: ObservableObject {
 
         let isExpired = entity.cachedAt.addingTimeInterval(CachePolicy.ttl) < .now
         return (chapters, isExpired)
+    }
+
+    private func loadCachedCurrentChapterFallback() -> [BookChapter]? {
+        guard let bookshelfViewModel,
+              let entity = bookshelfViewModel.bookEntity(for: detail.bookUrl) else {
+            return nil
+        }
+
+        let currentIndex = max(entity.currentChapterIndex, 0)
+        let cacheKey = ChapterCacheStore.makeKey(
+            sourceUrl: source.bookSourceUrl,
+            bookUrl: detail.bookUrl
+        )
+        guard ChapterCacheStore.hasNonEmptyContent(bookKey: cacheKey, index: currentIndex) else {
+            return nil
+        }
+
+        return (0...currentIndex).map { index in
+            BookChapter(
+                index: index,
+                title: index == currentIndex
+                    ? (entity.currentChapterName ?? "第\(index + 1)章")
+                    : "第\(index + 1)章",
+                url: "",
+                bookUrl: detail.bookUrl
+            )
+        }
     }
 
     private func saveChaptersToCache(_ chapters: [BookChapter], bookUrl: String) {

@@ -107,6 +107,7 @@ final class DZMReaderEngineViewTests: XCTestCase {
         chapter.bookID = "book-id"
         chapter.id = NSNumber(value: 1)
         chapter.content = "  正文"
+        chapter.sourceContentSignature = "cached-content"
         chapter.fullContent = NSAttributedString(string: "第一章\n\n  正文")
         chapter.pageCount = NSNumber(value: 1)
         chapter.paginationSignature = "390|844|0|18|0"
@@ -144,6 +145,26 @@ final class DZMReaderEngineViewTests: XCTestCase {
                 chapterCount: 2,
                 content: "  正文",
                 paginationSignature: "844|390|0|18|0"
+            )
+        )
+        XCTAssertTrue(
+            DZMNativeReadModelFactory.canReuseCachedPagination(
+                chapter,
+                title: "第一章",
+                chapterIndex: 0,
+                chapterCount: 2,
+                sourceContentSignature: "cached-content",
+                paginationSignature: "390|844|0|18|0"
+            )
+        )
+        XCTAssertFalse(
+            DZMNativeReadModelFactory.canReuseCachedPagination(
+                chapter,
+                title: "第一章",
+                chapterIndex: 0,
+                chapterCount: 2,
+                sourceContentSignature: "changed-content",
+                paginationSignature: "390|844|0|18|0"
             )
         )
     }

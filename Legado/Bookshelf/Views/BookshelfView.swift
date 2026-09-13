@@ -607,7 +607,12 @@ struct BookshelfReaderRouteView: View {
 
     @MainActor
     private func prepareReader() async {
-        await tocViewModel.loadToc()
+        let restoredFromCache = tocViewModel.restoreCachedChaptersIfAvailable()
+        if !restoredFromCache {
+            await tocViewModel.loadToc()
+        } else {
+            Task { @MainActor in await tocViewModel.loadToc() }
+        }
         guard let result = tocViewModel.makeReaderViewModel(startIndex: book.currentChapterIndex) else {
             onFailure(tocViewModel.errorMessage ?? "未能获取到目录")
             return

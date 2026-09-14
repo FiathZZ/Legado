@@ -363,6 +363,10 @@ struct BookDetailView: View {
         }
 
         readerDestination = ReaderDestination(vm: result.vm, bookID: result.bookID)
+        Task { @MainActor in
+            await tocVM.waitForBackgroundTocRefresh()
+            result.vm.updateChapters(tocVM.chapters)
+        }
     }
 
     private func handleSourceSwitch(_ selection: ChangeSourceSelection) {

@@ -629,6 +629,11 @@ struct BookshelfReaderRouteView: View {
             viewModel: result.vm,
             bookID: result.bookID
         )
+
+        Task { @MainActor in
+            await tocViewModel.waitForBackgroundTocRefresh()
+            result.vm.updateChapters(tocViewModel.chapters)
+        }
     }
 }
 

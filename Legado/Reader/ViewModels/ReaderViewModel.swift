@@ -63,7 +63,7 @@ final class ReaderViewModel: ObservableObject {
     @Published var toastMessage: String? = nil
 
     // MARK: 数据
-    let chapters: [BookChapter]
+    @Published private(set) var chapters: [BookChapter]
     let source: BookSource
     let bookName: String
     let bookAuthor: String
@@ -157,6 +157,13 @@ final class ReaderViewModel: ObservableObject {
     func loadCurrentChapter() async {
         await contentService.loadCurrentChapter(at: currentIndex)
         refreshCurrentError()
+    }
+
+    /// Replaces a temporary cache-only directory after the complete TOC arrives in background.
+    func updateChapters(_ chapters: [BookChapter]) {
+        guard !chapters.isEmpty else { return }
+        self.chapters = chapters
+        currentIndex = min(currentIndex, chapters.count - 1)
     }
 
     // MARK: 跳转章节

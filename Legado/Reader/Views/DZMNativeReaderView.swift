@@ -82,7 +82,7 @@ struct DZMNativeReaderSnapshot: Equatable {
     let restoredPosition: ReaderPosition
 
     var identity: String {
-        "\(bookID)|\(chapterIndex)|\(content.hashValue)"
+        "\(bookID)|\(chapterIndex)|\(chapters.count)|\(content.hashValue)"
     }
 }
 

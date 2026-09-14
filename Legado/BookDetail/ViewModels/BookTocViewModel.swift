@@ -62,6 +62,12 @@ final class BookTocViewModel: ObservableObject {
         }
     }
 
+    /// Waits for a refresh started while restoring cached reader content.
+    func waitForBackgroundTocRefresh() async {
+        guard let task = tocRefreshTask else { return }
+        await task.value
+    }
+
     /// Restores locally available TOC/body state before any network request starts.
     @discardableResult
     func restoreCachedChaptersIfAvailable() -> Bool {

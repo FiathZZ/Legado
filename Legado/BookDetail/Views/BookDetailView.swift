@@ -12,6 +12,7 @@ struct BookDetailView: View {
     @State private var showEditBookInfo = false
     @State private var showSourceSwitcher = false
     @State private var exportItem: ExportShareItem?
+    @State private var showClearCacheConfirmation = false
 
     private enum DetailNotice: Identifiable {
         case readerUnavailable
@@ -81,6 +82,9 @@ struct BookDetailView: View {
                         Button("导出 EPUB") {
                             Task { await exportCurrentBook(as: .epub) }
                         }
+                        Button("清理本书缓存", role: .destructive) {
+                            showClearCacheConfirmation = true
+                        }
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
@@ -92,7 +96,11 @@ struct BookDetailView: View {
         }
         .task {
             bookshelfViewModel.markAsRead(bookUrl: viewModel.searchBook.bookUrl)
-            await viewModel.loadDetail()
+            // A completed offline package already owns the book's TOC and chapter metadata.
+            // Do not fetch the detail page merely because the user opened this screen.
+            if !isOfflineBook {
+                await viewModel.loadDetail()
+            }
         }
         .onDisappear {
             viewModel.clearTocCache()
@@ -162,6 +170,16 @@ struct BookDetailView: View {
             case .exportFailed:
                 return Alert(title: Text("导出失败"), message: Text("请稍后重试"), dismissButton: .default(Text("确定")))
             }
+        }
+        .alert("清理本书缓存？", isPresented: $showClearCacheConfirmation) {
+            Button("清理", role: .destructive) {
+                if let currentBookEntity {
+                    bookshelfViewModel.clearBookCache(for: currentBookEntity)
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("将删除本书的章节正文、目录和离线清单，但不会移出书架或删除阅读进度。")
         }
     }
 
@@ -365,7 +383,10 @@ struct BookDetailView: View {
         readerDestination = ReaderDestination(vm: result.vm, bookID: result.bookID)
         Task { @MainActor in
             await tocVM.waitForBackgroundTocRefresh()
-            result.vm.updateChapters(tocVM.chapters)
+            result.vm.updateChapters(
+                tocVM.chapters,
+                hasCompleteTableOfContents: tocVM.hasCompleteTableOfContents
+            )
         }
     }
 
@@ -375,6 +396,12 @@ struct BookDetailView: View {
 
     private var currentBookEntity: BookEntity? {
         bookshelfViewModel.bookEntity(for: viewModel.searchBook.bookUrl)
+    }
+
+    private var isOfflineBook: Bool {
+        guard let book = currentBookEntity else { return false }
+        let key = ChapterCacheStore.makeKey(sourceUrl: book.sourceUrl, bookUrl: book.bookUrl)
+        return ChapterCacheStore.offlineBookManifest(bookKey: key) != nil
     }
 
     private var displayCoverUrl: String? {

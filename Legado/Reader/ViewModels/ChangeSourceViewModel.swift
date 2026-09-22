@@ -105,7 +105,18 @@ final class ChangeSourceViewModel: ObservableObject {
     private var searchTask: Task<Void, Never>?
     private var operationGeneration = UUID()
     private let inFlightWebBooks = InFlightWebBookRegistry()
+    // Android caps its source-search pool at 9 (AppConst.MAX_THREAD). Keep the same
+    // effective ceiling here; six workers is a faster default without saturating parsing.
+    private static let defaultMaxConcurrency = 6
+    private static let maximumConcurrency = 9
     private static let perSourceSearchTimeoutSeconds = 3
+
+    /// Matches Android's bounded source-search thread pool while keeping the reader responsive.
+    private var maxConcurrency: Int {
+        let configured = UserDefaults.standard.integer(forKey: "SearchMaxConcurrency")
+        let value = configured > 0 ? configured : Self.defaultMaxConcurrency
+        return min(max(value, 1), Self.maximumConcurrency)
+    }
 
     init(
         bookName: String,
@@ -212,10 +223,11 @@ final class ChangeSourceViewModel: ObservableObject {
             return
         }
 
-        // Source JavaScript cannot be force-killed by Swift task cancellation. Keep fallback
-        // discovery serial so one bad source cannot multiply CPU usage.
+        // Source JavaScript cannot be force-killed by Swift task cancellation. Use a bounded
+        // worker pool like Android: parallel enough to avoid one slow source blocking all others,
+        // but capped so malformed source rules cannot saturate the reader.
         let workQueue = ChangeSourceWorkQueue(sources: enabledSources)
-        let workerCount = 1
+        let workerCount = min(maxConcurrency, enabledSources.count)
         let webBookRegistry = inFlightWebBooks
         let sourceTimeoutSeconds = Self.perSourceSearchTimeoutSeconds
 

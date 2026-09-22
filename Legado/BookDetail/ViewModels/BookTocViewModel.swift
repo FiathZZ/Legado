@@ -15,6 +15,8 @@ final class BookTocViewModel: ObservableObject {
     @Published var chapters: [BookChapter] = []
     @Published var isLoading: Bool = false
     @Published var errorMessage: String? = nil
+    @Published private(set) var hasCompleteTableOfContents = false
+    @Published private var cacheRevision: Int = 0
 
     private var detail: BookDetail
     var source: BookSource
@@ -72,8 +74,37 @@ final class BookTocViewModel: ObservableObject {
     @discardableResult
     func restoreCachedChaptersIfAvailable() -> Bool {
         guard chapters.isEmpty else { return true }
+        let cacheKey = ChapterCacheStore.makeKey(
+            sourceUrl: source.bookSourceUrl,
+            bookUrl: detail.bookUrl
+        )
+        // A completed offline cache owns both TOC and content. Never refresh it in the
+        // background: opening a downloaded book must consume zero network traffic.
+        if let manifest = ChapterCacheStore.offlineBookManifest(bookKey: cacheKey) {
+            chapters = manifest.chapters
+            hasCompleteTableOfContents = true
+            syncChapterCount()
+            errorMessage = nil
+            return true
+        }
         if let cached = loadCachedChapters() {
-            chapters = cached.chapters
+            // Migrate an older complete body cache when its durable TOC is still available.
+            // Once promoted, every later reader and TOC entry is offline-only.
+            if cached.chapters.allSatisfy({
+                ChapterCacheStore.hasNonEmptyContent(bookKey: cacheKey, index: $0.index)
+            }) {
+                try? ChapterCacheStore.saveOfflineBookManifest(
+                    bookKey: cacheKey,
+                    chapters: cached.chapters
+                )
+                chapters = cached.chapters
+                hasCompleteTableOfContents = true
+                syncChapterCount()
+                errorMessage = nil
+                return true
+            }
+            chapters = chaptersExpandedThroughPersistedCache(cached.chapters)
+            hasCompleteTableOfContents = true
             syncChapterCount()
             errorMessage = nil
             if cached.isExpired, !LocalBookSupport.isLocalSource(source.bookSourceUrl) {
@@ -82,7 +113,8 @@ final class BookTocViewModel: ObservableObject {
             return true
         }
         guard let fallback = loadCachedCurrentChapterFallback() else { return false }
-        chapters = fallback
+        chapters = chaptersExpandedThroughPersistedCache(fallback)
+        hasCompleteTableOfContents = false
         syncChapterCount()
         errorMessage = nil
         if !LocalBookSupport.isLocalSource(source.bookSourceUrl) {
@@ -133,9 +165,24 @@ final class BookTocViewModel: ObservableObject {
             bookName: detail.name,
             bookAuthor: detail.author,
             allSources: allSources,
-            prefetchedBook: prefetchedSearchBook
+            prefetchedBook: prefetchedSearchBook,
+            hasCompleteTableOfContents: hasCompleteTableOfContents
         )
         return (vm, detail.bookUrl)
+    }
+
+    func isChapterCached(_ chapter: BookChapter) -> Bool {
+        _ = cacheRevision
+        guard !chapter.isVolume else { return false }
+        let key = ChapterCacheStore.makeKey(
+            sourceUrl: source.bookSourceUrl,
+            bookUrl: detail.bookUrl
+        )
+        return ChapterCacheStore.hasNonEmptyContent(bookKey: key, index: chapter.index)
+    }
+
+    func refreshCacheStatus() {
+        cacheRevision &+= 1
     }
 
     /// Reuses the successful source-selection probe instead of immediately issuing the same
@@ -143,6 +190,7 @@ final class BookTocViewModel: ObservableObject {
     func setPreloadedChapters(_ chapters: [BookChapter]) {
         guard self.chapters.isEmpty, !chapters.isEmpty else { return }
         self.chapters = chapters
+        hasCompleteTableOfContents = true
         errorMessage = nil
         saveChaptersToCache(chapters, bookUrl: detail.bookUrl)
         syncChapterCount()
@@ -182,6 +230,7 @@ final class BookTocViewModel: ObservableObject {
         detail = selection.detail
         source = selection.source
         chapters = selection.chapters
+        hasCompleteTableOfContents = true
         errorMessage = nil
 
         let generation = tocLoadGeneration
@@ -242,6 +291,7 @@ final class BookTocViewModel: ObservableObject {
             }
             guard generation == tocLoadGeneration else { return }
             chapters = fetched
+            hasCompleteTableOfContents = !fetched.isEmpty
             saveChaptersToCache(fetched, bookUrl: requestDetail.bookUrl)
             syncChapterCount()
             if chapters.isEmpty {
@@ -285,20 +335,77 @@ final class BookTocViewModel: ObservableObject {
             sourceUrl: source.bookSourceUrl,
             bookUrl: detail.bookUrl
         )
-        guard ChapterCacheStore.hasNonEmptyContent(bookKey: cacheKey, index: currentIndex) else {
+        let cachedIndices = ChapterCacheStore.cachedChapterIndices(bookKey: cacheKey)
+        guard !cachedIndices.isEmpty,
+              cachedIndices.contains(currentIndex) else {
             return nil
         }
 
-        return (0...currentIndex).map { index in
-            BookChapter(
+        // Rebuild the complete offline range from persisted chapter files. The old fallback
+        // stopped at currentIndex, which made an already-downloaded next chapter look missing
+        // and sent the native reader back to the network.
+        let lastIndex = cachedIndices.max() ?? currentIndex
+        return (0...lastIndex).map { index in
+            let metadata = ChapterCacheStore.chapterMetadata(bookKey: cacheKey, index: index)
+            return BookChapter(
                 index: index,
-                title: index == currentIndex
+                title: metadata?.title ?? (index == currentIndex
                     ? (entity.currentChapterName ?? "第\(index + 1)章")
-                    : "第\(index + 1)章",
-                url: "",
-                bookUrl: detail.bookUrl
+                    : "第\(index + 1)章"),
+                url: metadata?.url ?? "",
+                baseUrl: metadata?.baseUrl ?? "",
+                bookUrl: (metadata?.bookUrl.isEmpty == false ? metadata?.bookUrl : nil) ?? detail.bookUrl,
+                isVolume: metadata?.isVolume ?? false,
+                isVip: metadata?.isVip ?? false,
+                isPay: metadata?.isPay ?? false,
+                updateTime: metadata?.updateTime,
+                wordCount: metadata?.wordCount,
+                sourceVariables: metadata?.sourceVariables ?? [:],
+                bookVariables: metadata?.bookVariables ?? [:],
+                chapterVariables: metadata?.chapterVariables ?? [:],
+                variables: metadata?.variables ?? [:]
             )
         }
+    }
+
+    /// A TOC cache can be older than a completed body download. Keep its real titles and URLs,
+    /// then append lightweight offline entries for cached chapters that are newer than that TOC.
+    /// The reader can resolve those entries from ChapterCacheStore without touching the network.
+    private func chaptersExpandedThroughPersistedCache(_ cachedChapters: [BookChapter]) -> [BookChapter] {
+        guard !cachedChapters.isEmpty else { return cachedChapters }
+        let cacheKey = ChapterCacheStore.makeKey(
+            sourceUrl: source.bookSourceUrl,
+            bookUrl: detail.bookUrl
+        )
+        guard let lastCachedIndex = ChapterCacheStore.cachedChapterIndices(bookKey: cacheKey).max(),
+              lastCachedIndex >= cachedChapters.count else {
+            return cachedChapters
+        }
+
+        var expanded = cachedChapters
+        let existingIndices = Set(expanded.map(\.index))
+        for index in expanded.count...lastCachedIndex where !existingIndices.contains(index) {
+            let metadata = ChapterCacheStore.chapterMetadata(bookKey: cacheKey, index: index)
+            expanded.append(
+                BookChapter(
+                    index: index,
+                    title: metadata?.title ?? "第\(index + 1)章",
+                    url: metadata?.url ?? "",
+                    baseUrl: metadata?.baseUrl ?? "",
+                    bookUrl: (metadata?.bookUrl.isEmpty == false ? metadata?.bookUrl : nil) ?? detail.bookUrl,
+                    isVolume: metadata?.isVolume ?? false,
+                    isVip: metadata?.isVip ?? false,
+                    isPay: metadata?.isPay ?? false,
+                    updateTime: metadata?.updateTime,
+                    wordCount: metadata?.wordCount,
+                    sourceVariables: metadata?.sourceVariables ?? [:],
+                    bookVariables: metadata?.bookVariables ?? [:],
+                    chapterVariables: metadata?.chapterVariables ?? [:],
+                    variables: metadata?.variables ?? [:]
+                )
+            )
+        }
+        return expanded.sorted { $0.index < $1.index }
     }
 
     private func saveChaptersToCache(_ chapters: [BookChapter], bookUrl: String) {

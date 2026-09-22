@@ -341,6 +341,21 @@ final class BookshelfViewModel: ObservableObject {
         books.first { $0.bookUrl == bookUrl }
     }
 
+    /// Clears one book's offline chapter files and persisted TOC while keeping its shelf record.
+    func clearBookCache(for entity: BookEntity) {
+        clearCaches(for: entity)
+        ReaderSessionCache.shared.remove(bookID: entity.bookUrl, sourceURL: entity.sourceUrl)
+    }
+
+    /// Clears all offline reading data while preserving books, progress, and settings.
+    func clearAllReadingCaches() async {
+        let cachedTOCs = (try? modelContext.fetch(FetchDescriptor<TocCacheEntity>())) ?? []
+        cachedTOCs.forEach(modelContext.delete)
+        try? modelContext.save()
+        await ChapterCacheStore.clearAll()
+        ReaderSessionCache.shared.removeAll()
+    }
+
     // MARK: 移除书籍
     func removeBook(_ entity: BookEntity) {
         removeBooksAndCaches([entity])

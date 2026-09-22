@@ -115,8 +115,8 @@ class DZMReadMenu: NSObject,UIGestureRecognizerDelegate {
         // 隐藏状态栏
         UIApplication.shared.setStatusBarHidden(!isMenuShow, with: .fade)
         
-        // 允许获取电量信息
-        UIDevice.current.isBatteryMonitoringEnabled = true
+        // 电量监测改由 DZMReadViewStatusBottomView 按引用计数开启/关闭，
+        // 不再在此处无条件开启，避免菜单创建后应用全程保持电量监测。
         
         // 隐藏导航栏
         vc.fd_prefersNavigationBarHidden = true

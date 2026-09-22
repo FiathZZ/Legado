@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import CommonCrypto
 
 /// Coalesces high-frequency reader position changes into at most one persistent write per
 /// interval. The newest position is retained, and lifecycle transitions can flush it at once.
@@ -65,6 +66,7 @@ final class ReaderProgressSaveCoordinator {
 struct ReaderProgressService {
     private let defaults = UserDefaults.standard
     private let positionKeyPrefix = "reader.progress.position."
+    private let progressDirectoryName = "ReaderProgress"
 
     func saveReadingProgress(
         bookEntity: BookEntity?,
@@ -86,13 +88,18 @@ struct ReaderProgressService {
         let persistedPosition = currentPosition ?? ReaderPosition(chapterIndex: chapterIndex)
         if let data = try? JSONEncoder().encode(persistedPosition) {
             defaults.set(data, forKey: positionKey(for: bookURL))
+            try? data.write(to: progressFileURL(for: bookURL), options: [.atomic])
         }
     }
 
     func restoreReadingProgress(bookURL: String, fallbackChapterIndex: Int) -> ReaderPosition {
-        guard !bookURL.isEmpty,
-              let data = defaults.data(forKey: positionKey(for: bookURL)),
-              let position = try? JSONDecoder().decode(ReaderPosition.self, from: data) else {
+        guard !bookURL.isEmpty else {
+            return ReaderPosition(chapterIndex: fallbackChapterIndex)
+        }
+        let persistedData = (try? Data(contentsOf: progressFileURL(for: bookURL)))
+            ?? defaults.data(forKey: positionKey(for: bookURL))
+        guard let persistedData,
+              let position = try? JSONDecoder().decode(ReaderPosition.self, from: persistedData) else {
             return ReaderPosition(chapterIndex: fallbackChapterIndex)
         }
         return position
@@ -100,6 +107,21 @@ struct ReaderProgressService {
 
     private func positionKey(for bookURL: String) -> String {
         positionKeyPrefix + bookURL
+    }
+
+    private func progressFileURL(for bookURL: String) -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let directory = base.appendingPathComponent(progressDirectoryName, isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.appendingPathComponent("\(stableKey(for: bookURL)).json")
+    }
+
+    private func stableKey(for bookURL: String) -> String {
+        let data = Data(bookURL.utf8)
+        var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+        data.withUnsafeBytes { _ = CC_SHA256($0.baseAddress, CC_LONG(data.count), &digest) }
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 }
 

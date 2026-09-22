@@ -74,6 +74,9 @@ class DZMRMTopView: DZMRMBaseView {
         let symbolName: String
         let accessibilityValue: String
         switch state {
+        case .unavailable:
+            symbolName = "exclamationmark.triangle"
+            accessibilityValue = "目录不完整，不能缓存全书"
         case .available:
             symbolName = "arrow.down.to.line"
             accessibilityValue = "未缓存"

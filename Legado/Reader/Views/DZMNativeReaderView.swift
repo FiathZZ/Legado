@@ -88,8 +88,14 @@ struct DZMNativeReaderSnapshot: Equatable {
 
 enum DZMReaderChapterTitleResolver {
     static func resolve(snapshotTitle: String, recordChapterTitle: String?) -> String {
+        let snapshot = snapshotTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The native engine can restore an old record whose name is empty or the generic
+        // placeholder. The current directory snapshot is authoritative for the visible title.
+        if !snapshot.isEmpty {
+            return snapshot
+        }
         let currentTitle = recordChapterTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return currentTitle.isEmpty ? snapshotTitle : currentTitle
+        return currentTitle.isEmpty || currentTitle == "(无章节名)" ? "阅读中" : currentTitle
     }
 }
 

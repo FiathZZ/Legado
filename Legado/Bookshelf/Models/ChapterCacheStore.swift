@@ -6,6 +6,12 @@ import CommonCrypto
 struct ChapterCacheStore {
     nonisolated private static let rootDirectoryName = "ChapterCache"
 
+    /// The durable boundary of a completed offline book. A body file alone is an incremental
+    /// cache; only this manifest means the TOC and every chapter are available offline.
+    nonisolated struct OfflineBookManifest: Codable, Sendable {
+        let chapters: [BookChapter]
+    }
+
     nonisolated static func content(bookKey: String, index: Int) -> String? {
         let fileURL = chapterFileURL(bookKey: bookKey, index: index)
         return try? String(contentsOf: fileURL, encoding: .utf8)
@@ -20,6 +26,31 @@ struct ChapterCacheStore {
             return nil
         }
         return Int(value.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    nonisolated static func chapterMetadata(bookKey: String, index: Int) -> BookChapter? {
+        guard let data = try? Data(contentsOf: chapterMetadataFileURL(bookKey: bookKey, index: index)) else { return nil }
+        return try? JSONDecoder().decode(BookChapter.self, from: data)
+    }
+
+    nonisolated static func offlineBookManifest(bookKey: String) -> OfflineBookManifest? {
+        guard let data = try? Data(contentsOf: offlineManifestFileURL(bookKey: bookKey)) else { return nil }
+        return try? JSONDecoder().decode(OfflineBookManifest.self, from: data)
+    }
+
+    nonisolated static func saveOfflineBookManifest(bookKey: String, chapters: [BookChapter]) throws {
+        guard !chapters.isEmpty else { return }
+        let manifest = OfflineBookManifest(chapters: chapters)
+        try persist(data: JSONEncoder().encode(manifest), to: offlineManifestFileURL(bookKey: bookKey))
+    }
+
+    nonisolated static func isOfflineBookComplete(bookKey: String) -> Bool {
+        guard let manifest = offlineBookManifest(bookKey: bookKey), !manifest.chapters.isEmpty else {
+            return false
+        }
+        return manifest.chapters.allSatisfy {
+            hasNonEmptyContent(bookKey: bookKey, index: $0.index)
+        }
     }
 
     /// Cache-completeness checks must not decode every chapter into a `String`. A large offline
@@ -47,10 +78,14 @@ struct ChapterCacheStore {
         bookKey: String,
         index: Int,
         content: String,
+        chapter: BookChapter? = nil,
         contentRuleRevision: Int? = nil
     ) throws {
         let fileURL = chapterFileURL(bookKey: bookKey, index: index)
         try persist(content: content, to: fileURL)
+        if let chapter, let data = try? JSONEncoder().encode(chapter) {
+            try persist(data: data, to: chapterMetadataFileURL(bookKey: bookKey, index: index))
+        }
 
         let revisionURL = chapterRuleRevisionFileURL(bookKey: bookKey, index: index)
         if let contentRuleRevision {
@@ -66,6 +101,7 @@ struct ChapterCacheStore {
         bookKey: String,
         index: Int,
         content: String,
+        chapter: BookChapter? = nil,
         contentRuleRevision: Int? = nil
     ) async throws {
         try await Task.detached(priority: .utility) {
@@ -73,20 +109,31 @@ struct ChapterCacheStore {
                 bookKey: bookKey,
                 index: index,
                 content: content,
+                chapter: chapter,
                 contentRuleRevision: contentRuleRevision
             )
         }.value
     }
 
     nonisolated static func clear(bookKey: String) {
-        let directoryURL = bookDirectoryURL(bookKey: bookKey)
         Task.detached(priority: .utility) {
-            guard FileManager.default.fileExists(atPath: directoryURL.path) else { return }
-            do {
-                try FileManager.default.removeItem(at: directoryURL)
-            } catch {
-            }
+            await clearAsync(bookKey: bookKey)
         }
+    }
+
+    nonisolated static func clearAsync(bookKey: String) async {
+        let directoryURL = bookDirectoryURL(bookKey: bookKey)
+        guard FileManager.default.fileExists(atPath: directoryURL.path) else { return }
+        do {
+            try FileManager.default.removeItem(at: directoryURL)
+        } catch {
+        }
+    }
+
+    nonisolated static func clearAll() async {
+        let directoryURL = rootDirectoryURL()
+        guard FileManager.default.fileExists(atPath: directoryURL.path) else { return }
+        try? FileManager.default.removeItem(at: directoryURL)
     }
 
     static func makeKey(sourceUrl: String, bookUrl: String) -> String {
@@ -118,6 +165,28 @@ struct ChapterCacheStore {
         .sorted { $0.index < $1.index }
     }
 
+    /// Returns indexes with non-empty persisted chapter bodies without loading their text.
+    nonisolated static func cachedChapterIndices(bookKey: String) -> [Int] {
+        let directoryURL = bookDirectoryURL(bookKey: bookKey)
+        guard let fileURLs = try? FileManager.default.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        return fileURLs.compactMap { fileURL in
+            guard fileURL.pathExtension == "txt" || fileURL.pathExtension.isEmpty,
+                  let index = Int(fileURL.deletingPathExtension().lastPathComponent),
+                  let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey]),
+                  (values.fileSize ?? 0) > 0 else {
+                return nil
+            }
+            return index
+        }.sorted()
+    }
+
     nonisolated private static func chapterFileURL(bookKey: String, index: Int) -> URL {
         bookDirectoryURL(bookKey: bookKey).appendingPathComponent("\(index).txt")
     }
@@ -126,10 +195,24 @@ struct ChapterCacheStore {
         bookDirectoryURL(bookKey: bookKey).appendingPathComponent("\(index).rules")
     }
 
+    nonisolated private static func chapterMetadataFileURL(bookKey: String, index: Int) -> URL {
+        bookDirectoryURL(bookKey: bookKey).appendingPathComponent("\(index).meta")
+    }
+
+    nonisolated private static func offlineManifestFileURL(bookKey: String) -> URL {
+        bookDirectoryURL(bookKey: bookKey).appendingPathComponent("offline-manifest.json")
+    }
+
     nonisolated private static func persist(content: String, to fileURL: URL) throws {
         let directoryURL = fileURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
         try content.write(to: fileURL, atomically: true, encoding: .utf8)
+    }
+
+    nonisolated private static func persist(data: Data, to fileURL: URL) throws {
+        let directoryURL = fileURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        try data.write(to: fileURL, options: [.atomic])
     }
 
     nonisolated private static func bookDirectoryURL(bookKey: String) -> URL {

@@ -223,14 +223,13 @@ private actor SourceSearchResultAccumulator {
 // MARK: - 搜索结果 ViewModel
 /// 并发从多个书源搜索。
 ///
-/// 规则解析包含 HTML 与 JavaScript 的同步计算；iOS 不能像 Android 一样依赖独立
-/// VM 线程池承接所有计算。保守的并发上限让搜索继续流式返回，同时给阅读器和
-/// 触控事件保留足够的 CPU 时间。
+/// 规则解析包含 HTML 与 JavaScript 的同步计算；使用与 Android `AppConst.MAX_THREAD`
+/// 一致的受控线程池上限。单个书源仍有超时和其自身的并发/限速配置。
 @MainActor
 final class SearchResultViewModel: ObservableObject {
 
-    private static let defaultMaxConcurrency = 3
-    private static let maximumConcurrency = 4
+    private static let defaultMaxConcurrency = 6
+    private static let maximumConcurrency = 9
     private static let perSourceSearchTimeoutSeconds = 3
     private static let resultPublishDelayNanoseconds: UInt64 = 200_000_000
 
@@ -243,7 +242,7 @@ final class SearchResultViewModel: ObservableObject {
     @Published var sourceOutcomes: [SourceSearchOutcome] = []
 
     // MARK: 配置
-    /// 最大并发搜索数。默认 3、最多 4，防止复杂书源的规则计算抢占阅读器。
+    /// 最大并发搜索数。默认 6、最多 9，与 Android 的 AppConst.MAX_THREAD 对齐。
     var maxConcurrency: Int {
         get {
             let configured = UserDefaults.standard

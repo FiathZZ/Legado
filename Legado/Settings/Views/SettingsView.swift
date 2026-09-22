@@ -8,6 +8,7 @@ struct SettingsView: View {
     @State private var isProcessing = false
     @State private var progressMessage = ""
     @State private var alertState: SettingsAlertState?
+    @State private var showClearAllCacheConfirmation = false
 
     var body: some View {
         NavigationStack {
@@ -71,6 +72,19 @@ struct SettingsView: View {
                         )
                     }
                     .themedSurfaceListRow()
+
+                    Button {
+                        showClearAllCacheConfirmation = true
+                    } label: {
+                        SettingsOverviewRow(
+                            icon: "trash",
+                            title: "清理全部阅读缓存",
+                            detail: "删除所有章节、目录和离线清单，保留书架与阅读进度"
+                        )
+                    }
+                    .disabled(isProcessing)
+                    .tint(themeManager.color(.destructive))
+                    .themedSurfaceListRow()
                 }
 
                 Section("关于") {
@@ -124,6 +138,14 @@ struct SettingsView: View {
             } message: {
                 Text(alertState?.message ?? "")
             }
+            .alert("清理全部阅读缓存？", isPresented: $showClearAllCacheConfirmation) {
+                Button("全部清理", role: .destructive) {
+                    Task { await clearAllReadingCaches() }
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("将删除所有书籍的章节正文、目录、离线清单和内存阅读会话，但不会删除书架、阅读进度或书源。")
+            }
             .overlay {
                 if isProcessing {
                     ZStack {
@@ -162,6 +184,22 @@ struct SettingsView: View {
                 message: error.localizedDescription
             )
         }
+    }
+
+    private func clearAllReadingCaches() async {
+        isProcessing = true
+        progressMessage = "正在清理阅读缓存…"
+        defer {
+            isProcessing = false
+            progressMessage = ""
+        }
+
+        let bookshelfViewModel = BookshelfViewModel(modelContext: modelContext)
+        await bookshelfViewModel.clearAllReadingCaches()
+        alertState = SettingsAlertState(
+            title: "清理完成",
+            message: "全部阅读缓存已清理，书架和阅读进度已保留。"
+        )
     }
 
 }

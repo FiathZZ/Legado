@@ -42,6 +42,11 @@ struct BookTocView: View {
                 await viewModel.loadToc()
             }
         }
+        .onAppear {
+            // Returning from the reader may have added hundreds of cache files while this view
+            // stayed alive in the navigation stack. Force the row badges to re-evaluate.
+            viewModel.refreshCacheStatus()
+        }
         .navigationDestination(item: $readerDestination) { destination in
             ReaderView(
                 viewModel: destination.viewModel,
@@ -100,6 +105,12 @@ struct BookTocView: View {
                         .padding(.vertical, 2)
                         .background(themeManager.softColor(.warning), in: Capsule())
                         .foregroundStyle(themeManager.color(.warning))
+                }
+                if viewModel.isChapterCached(chapter) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(themeManager.color(.success))
+                        .accessibilityLabel("已下载")
                 }
             }
             .padding(.vertical, 2)

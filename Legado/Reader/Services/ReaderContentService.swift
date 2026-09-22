@@ -22,12 +22,14 @@ final class ReaderContentService: ObservableObject {
     @Published private(set) var downloadProgress: Double? = nil
     @Published private(set) var isEntireBookCached: Bool
 
-    private let chapters: [BookChapter]
+    private var chapters: [BookChapter]
     private let source: BookSource
     private let bookName: String
     private let chapterCacheKey: String
+    private let initialIndex: Int
     private let modelContext: ModelContext?
     private var cachedContentReplaceRules: [ReplaceRule]?
+    private var isOfflineBook: Bool
     private var chapterLoadWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
     private var cancellables = Set<AnyCancellable>()
 
@@ -43,8 +45,12 @@ final class ReaderContentService: ObservableObject {
         self.source = source
         self.bookName = bookName
         self.chapterCacheKey = chapterCacheKey
+        self.initialIndex = min(max(initialIndex, 0), max(chapters.count - 1, 0))
         self.modelContext = modelContext
-        self.isEntireBookCached = false
+        // The manifest opts this book into offline-only reading. Completeness controls the UI
+        // checkmark separately; a damaged package must not fall back to network.
+        self.isOfflineBook = ChapterCacheStore.offlineBookManifest(bookKey: chapterCacheKey) != nil
+        self.isEntireBookCached = ChapterCacheStore.isOfflineBookComplete(bookKey: chapterCacheKey)
         if chapters.indices.contains(initialIndex),
            let persistedContent = ChapterCacheStore.content(bookKey: chapterCacheKey, index: initialIndex),
            !persistedContent.isEmpty {
@@ -58,21 +64,23 @@ final class ReaderContentService: ObservableObject {
             )
         }
         observeReplaceRuleChanges()
-        // Scanning a complete book means opening every cached chapter file. Keep that work off
-        // the main actor so entering a reader with a large offline cache remains responsive.
-        Task { [weak self] in
-            guard let self else { return }
-            self.isEntireBookCached = await Task.detached(priority: .utility) {
-                Self.hasPersistedEntireBook(
-                    chapterCount: chapters.count,
-                    chapterCacheKey: chapterCacheKey
-                )
-            }.value
-        }
     }
 
     func cachedChapter(at index: Int) -> CachedChapter? {
         cachedChapters[index]
+    }
+
+    /// Replaces a cache-only fallback directory once the complete TOC is available.
+    /// Chapter loading uses this service snapshot, so updating only the view model is insufficient.
+    func updateChapters(_ chapters: [BookChapter]) {
+        guard !chapters.isEmpty else { return }
+        self.chapters = chapters
+        cachedChapters = cachedChapters.reduce(into: [:]) { result, entry in
+            guard chapters.indices.contains(entry.key) else { return }
+            var cached = entry.value
+            cached.chapter = chapters[entry.key]
+            result[entry.key] = cached
+        }
     }
 
     func loadCurrentChapter(at index: Int) async {
@@ -96,6 +104,13 @@ final class ReaderContentService: ObservableObject {
             return
         }
 
+        // A completed offline manifest is an explicit no-network contract. A damaged cache
+        // must report its problem instead of silently consuming mobile data to repair itself.
+        if isOfflineBook {
+            cachedChapters[index] = CachedChapter(chapter: chapter, error: "离线缓存不完整，请重新缓存全书")
+            return
+        }
+
         cachedChapters[index] = CachedChapter(chapter: chapter, isLoading: true)
         defer {
             let waiters = chapterLoadWaiters.removeValue(forKey: index) ?? []
@@ -110,6 +125,7 @@ final class ReaderContentService: ObservableObject {
                     bookKey: chapterCacheKey,
                     index: index,
                     content: content,
+                    chapter: cachedChapter.chapter,
                     contentRuleRevision: contentRuleRevision
                 )
             }
@@ -146,26 +162,44 @@ final class ReaderContentService: ObservableObject {
 
     }
 
-    /// Caches every chapter in the book, including chapters before the current reading position.
-    /// This intentionally differs from `downloadChapters(from:count:)`, whose existing behavior
-    /// starts at the current chapter for the reader's incremental cache actions.
+    /// Caches from the current reading chapter through the end of the book. Chapters before the
+    /// current position are intentionally excluded from the offline package.
     func downloadEntireBook() async {
         guard !isDownloading, !chapters.isEmpty else { return }
 
         isDownloading = true
         downloadProgress = 0
-        for index in chapters.indices {
+        let start = min(max(initialIndex, 0), chapters.count - 1)
+        let indexes = Array(start..<chapters.count)
+        for (offset, index) in indexes.enumerated() {
             if Task.isCancelled { break }
             await cacheChapterForDownload(at: index)
-            publishDownloadProgress(completed: index + 1, total: chapters.count)
+            publishDownloadProgress(completed: offset + 1, total: indexes.count)
             await Task.yield()
         }
 
         let chapterCount = chapters.count
         let cacheKey = chapterCacheKey
-        isEntireBookCached = await Task.detached(priority: .utility) {
-            Self.hasPersistedEntireBook(chapterCount: chapterCount, chapterCacheKey: cacheKey)
+        let manifestChapters = Array(chapters[start...])
+        let cacheStart = start
+        let completed = await Task.detached(priority: .utility) {
+            Self.hasPersistedEntireBook(
+                chapterCount: chapterCount,
+                startingAt: cacheStart,
+                chapterCacheKey: cacheKey
+            )
         }.value
+        if completed {
+            do {
+                try await Task.detached(priority: .utility) {
+                    try ChapterCacheStore.saveOfflineBookManifest(bookKey: cacheKey, chapters: manifestChapters)
+                }.value
+                isOfflineBook = ChapterCacheStore.isOfflineBookComplete(bookKey: cacheKey)
+            } catch {
+                isOfflineBook = false
+            }
+        }
+        isEntireBookCached = isOfflineBook
         isDownloading = false
         downloadProgress = nil
     }
@@ -232,6 +266,7 @@ final class ReaderContentService: ObservableObject {
                 bookKey: chapterCacheKey,
                 index: index,
                 content: cachedContent,
+                chapter: chapters[index],
                 contentRuleRevision: contentRuleRevision
             )
             return
@@ -250,6 +285,7 @@ final class ReaderContentService: ObservableObject {
             bookKey: chapterCacheKey,
             index: index,
             content: content,
+            chapter: chapters[index],
             contentRuleRevision: contentRuleRevision
         )
     }
@@ -410,6 +446,7 @@ final class ReaderContentService: ObservableObject {
                 bookKey: cacheKey,
                 index: index,
                 content: processed,
+                chapter: chapters[index],
                 contentRuleRevision: revision
             )
         }
@@ -453,6 +490,7 @@ final class ReaderContentService: ObservableObject {
                     bookKey: cacheKey,
                     index: entry.index,
                     content: entry.content,
+                    chapter: chapters[entry.index],
                     contentRuleRevision: revision
                 )
             }
@@ -537,10 +575,11 @@ final class ReaderContentService: ObservableObject {
 
     nonisolated static func hasPersistedEntireBook(
         chapterCount: Int,
+        startingAt: Int = 0,
         chapterCacheKey: String
     ) -> Bool {
-        guard chapterCount > 0 else { return false }
-        return (0..<chapterCount).allSatisfy { index in
+        guard chapterCount > 0, startingAt >= 0, startingAt < chapterCount else { return false }
+        return (startingAt..<chapterCount).allSatisfy { index in
             ChapterCacheStore.hasNonEmptyContent(bookKey: chapterCacheKey, index: index)
         }
     }

@@ -83,9 +83,19 @@ class DZMReadViewStatusBottomView: UIView {
         
         if timer == nil {
             
-            timer = Timer.scheduledTimer(timeInterval: 15, target: self, selector: #selector(didChangeTime), userInfo: nil, repeats: true)
+            // Timer 会强引用 target。原先的 target/selector 写法与本视图构成保留环：
+            // removeTimer() 只在 deinit 中调用，而 deinit 因保留环永不执行，
+            // 于是每个状态栏视图都带着一个永不停止的定时器常驻内存。
+            // 本视图在翻页/切章时会被反复新建，泄漏随阅读量线性累积。
+            // 改用 block 版本并弱引用 self，让 deinit 能正常执行。
+            timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+                self?.didChangeTime()
+            }
             
             RunLoop.current.add(timer!, forMode: .common)
+            
+            // 仅在定时器存活期间开启电量监测
+            DZMBatteryMonitoring.acquire()
         }
     }
     
@@ -97,6 +107,26 @@ class DZMReadViewStatusBottomView: UIView {
             timer!.invalidate()
             
             timer = nil
+            
+            DZMBatteryMonitoring.release()
+        }
+    }
+    
+    /// 视图离开窗口即停表
+    ///
+    /// 定时器由 RunLoop 持有，只有 invalidate 才会真正停止。视图被移出层级后已无显示
+    /// 意义，这里主动停表，避免不可见的状态栏继续每 15 秒空转耗电。
+    override func didMoveToWindow() {
+        
+        super.didMoveToWindow()
+        
+        if window == nil {
+            
+            removeTimer()
+            
+        }else{
+            
+            addTimer()
         }
     }
     
@@ -117,5 +147,61 @@ class DZMReadViewStatusBottomView: UIView {
     required init?(coder aDecoder: NSCoder) {
         
         fatalError("init(coder:) has not been implemented")
+    }
+}
+
+/// 电量监测的引用计数管理
+///
+/// `UIDevice.isBatteryMonitoringEnabled` 是进程级开关，一旦开启系统会持续监测电量变化。
+/// 阅读器会在翻页/切章时反复创建状态栏视图，若在视图初始化里无条件开启且从不着手关闭，
+/// 应用会在整个生命周期内保持电量监测。这里用引用计数保证：有视图需要时才开启，
+/// 全部释放后立即关闭。
+enum DZMBatteryMonitoring {
+    
+    private static var referenceCount = 0
+    
+    private static let lock = NSLock()
+    
+    /// 申请电量监测
+    static func acquire() {
+        
+        lock.lock()
+        
+        referenceCount += 1
+        
+        let shouldEnable = (referenceCount == 1)
+        
+        lock.unlock()
+        
+        if shouldEnable { setEnabled(true) }
+    }
+    
+    /// 释放电量监测
+    static func release() {
+        
+        lock.lock()
+        
+        if referenceCount > 0 { referenceCount -= 1 }
+        
+        let shouldDisable = (referenceCount == 0)
+        
+        lock.unlock()
+        
+        if shouldDisable { setEnabled(false) }
+    }
+    
+    private static func setEnabled(_ isEnabled: Bool) {
+        
+        if Thread.isMainThread {
+            
+            UIDevice.current.isBatteryMonitoringEnabled = isEnabled
+            
+        }else{
+            
+            DispatchQueue.main.async {
+                
+                UIDevice.current.isBatteryMonitoringEnabled = isEnabled
+            }
+        }
     }
 }

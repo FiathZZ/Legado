@@ -125,9 +125,7 @@ struct BookshelfView: View {
                 isPresented: Binding(
                     get: { exportErrorMessage != nil },
                     set: { newValue in
-                        if !newValue {
-                            exportErrorMessage = nil
-                        }
+                        if !newValue { exportErrorMessage = nil }
                     }
                 )
             ) {
@@ -277,7 +275,14 @@ struct BookshelfView: View {
                         book: book,
                         source: allSources.first(where: { $0.bookSourceUrl == book.sourceUrl }),
                         isEditing: viewModel.isEditing,
-                        isSelected: viewModel.selectedBookURLs.contains(book.bookUrl)
+                        isSelected: viewModel.selectedBookURLs.contains(book.bookUrl),
+                        onDetail: {
+                            guard !viewModel.isEditing else { return }
+                            navigationTarget = BookshelfNavigationTarget(
+                                bookUrl: book.bookUrl,
+                                destination: .detail
+                            )
+                        }
                     )
                     .contentShape(Rectangle())
                     .onTapGesture {
@@ -287,29 +292,34 @@ struct BookshelfView: View {
                             openReader(for: book)
                         }
                     }
-                    .onLongPressGesture(minimumDuration: 0.55) {
-                        guard !viewModel.isEditing else { return }
-                        navigationTarget = BookshelfNavigationTarget(bookUrl: book.bookUrl, destination: .detail)
-                    }
                     .contextMenu {
-                        if !viewModel.groups.isEmpty && !viewModel.isEditing {
-                            Menu("移入分组") {
-                                ForEach(viewModel.groups, id: \.groupId) { group in
-                                    Button {
-                                        viewModel.toggleGroup(group.groupId, for: book)
-                                    } label: {
-                                        Label(
-                                            group.groupName,
-                                            systemImage: book.hasGroup(group.groupId)
-                                                ? "checkmark.circle.fill"
-                                                : "circle"
-                                        )
+                        if !viewModel.isEditing {
+                            Button {
+                                navigationTarget = BookshelfNavigationTarget(
+                                    bookUrl: book.bookUrl,
+                                    destination: .detail
+                                )
+                            } label: {
+                                Label("书籍详情", systemImage: "info.circle")
+                            }
+
+                            if !viewModel.groups.isEmpty {
+                                Menu("移入分组") {
+                                    ForEach(viewModel.groups, id: \.groupId) { group in
+                                        Button {
+                                            viewModel.toggleGroup(group.groupId, for: book)
+                                        } label: {
+                                            Label(
+                                                group.groupName,
+                                                systemImage: book.hasGroup(group.groupId)
+                                                    ? "checkmark.circle.fill"
+                                                    : "circle"
+                                            )
+                                        }
                                     }
                                 }
                             }
-                        }
 
-                        if !viewModel.isEditing {
                             Menu("导出") {
                                 Button("导出 TXT") {
                                     Task { await export(book, format: .txt) }
@@ -436,6 +446,7 @@ private struct BookCoverCell: View {
     let source: BookSource?
     var isEditing: Bool = false
     var isSelected: Bool = false
+    var onDetail: (() -> Void)?
 
     private var shouldShowCurrentChapter: Bool {
         guard let currentChapterName = book.currentChapterName,
@@ -485,6 +496,22 @@ private struct BookCoverCell: View {
                         }
                     }
                     .padding(6)
+                }
+                .overlay(alignment: .topLeading) {
+                    if !isEditing {
+                        Button {
+                            onDetail?()
+                        } label: {
+                            Image(systemName: "info.circle")
+                                .font(.title3)
+                                .foregroundStyle(themeManager.color(.selectionText))
+                                .shadow(radius: 2)
+                                .padding(6)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("书籍详情")
+                    }
                 }
                 .overlay {
                     if isEditing {
@@ -632,7 +659,10 @@ struct BookshelfReaderRouteView: View {
 
         Task { @MainActor in
             await tocViewModel.waitForBackgroundTocRefresh()
-            result.vm.updateChapters(tocViewModel.chapters)
+            result.vm.updateChapters(
+                tocViewModel.chapters,
+                hasCompleteTableOfContents: tocViewModel.hasCompleteTableOfContents
+            )
         }
     }
 }

@@ -209,6 +209,11 @@ private actor SourceSearchResultAccumulator {
         )
     }
 
+    /// 排序分层：完全匹配 → 前缀匹配 → 包含关键词 → 其余。
+    ///
+    /// 对齐 Android `SearchModel.mergeItems()` 的 equalData / containsData / otherData 分桶，
+    /// 并保留 iOS 原有的「书名前缀优先于作者前缀」细分。因为「搜索」模式不再过滤结果，
+    /// 最后一档必须存在，否则不含关键词的书无法参与排序。
     private static func matchScore(_ book: SearchBook, keyword: String) -> Int {
         let name = book.name.lowercased()
         let author = book.author.lowercased()
@@ -216,7 +221,8 @@ private actor SourceSearchResultAccumulator {
         if author == keyword { return 1 }
         if name.hasPrefix(keyword) { return 2 }
         if author.hasPrefix(keyword) { return 3 }
-        return 4
+        if name.contains(keyword) || author.contains(keyword) { return 4 }
+        return 5
     }
 }
 
@@ -224,13 +230,15 @@ private actor SourceSearchResultAccumulator {
 /// 并发从多个书源搜索。
 ///
 /// 规则解析包含 HTML 与 JavaScript 的同步计算；使用与 Android `AppConst.MAX_THREAD`
-/// 一致的受控线程池上限。单个书源仍有超时和其自身的并发/限速配置。
+/// 一致的受控线程池上限（9）。单个书源的超时对齐 Android `SearchModel` 的
+/// `withTimeout`，取 15 秒（Android 为 30 秒）：既能救回响应偏慢的书源，
+/// 又不至于让整轮搜索长时间占着并发位。
 @MainActor
 final class SearchResultViewModel: ObservableObject {
 
-    private static let defaultMaxConcurrency = 6
+    private static let defaultMaxConcurrency = 9
     private static let maximumConcurrency = 9
-    private static let perSourceSearchTimeoutSeconds = 3
+    private static let perSourceSearchTimeoutSeconds = 15
     private static let resultPublishDelayNanoseconds: UInt64 = 200_000_000
 
     // MARK: 状态
@@ -242,7 +250,7 @@ final class SearchResultViewModel: ObservableObject {
     @Published var sourceOutcomes: [SourceSearchOutcome] = []
 
     // MARK: 配置
-    /// 最大并发搜索数。默认 6、最多 9，与 Android 的 AppConst.MAX_THREAD 对齐。
+    /// 最大并发搜索数。默认 9、最多 9，与 Android 的 AppConst.MAX_THREAD 对齐。
     var maxConcurrency: Int {
         get {
             let configured = UserDefaults.standard
@@ -425,7 +433,7 @@ final class SearchResultViewModel: ObservableObject {
                 return try await webBook.searchBook(keyword: keyword)
             }
             let books = allBooks
-                .filter { Self.matchesKeyword($0, keyword: keyword, mode: matchMode) }
+                .filter { Self.shouldKeepResult($0, keyword: keyword, mode: matchMode) }
                 .map(Self.makeLightweightResult)
             await registry.shutdownAndRemove(webBook)
             return SourceSearchOutcome(
@@ -537,6 +545,36 @@ final class SearchResultViewModel: ObservableObject {
         return trimmed
     }
 
+    /// 该书源返回的条目是否保留。
+    ///
+    /// 对齐 Android `SearchModel.startSearch()` 里的
+    /// `filter = { name, author -> !precision || name.contains(key) || author.contains(key) }`：
+    ///
+    /// - `.contains`（「搜索」）对应 `precision = false`，**不做过滤**，全部保留，
+    ///   由 `SourceSearchResultAccumulator` 的排序把完全匹配、前缀匹配的书提到前面。
+    ///   这正是 iOS 之前「搜不到书」的根因 —— 旧实现把这一档当成了硬过滤条件。
+    /// - `.exact`（「精准搜索」）沿用 iOS 原有的完全相等语义，比 Android 的
+    ///   `precision = true`（只要求包含关键词）更严格。
+    nonisolated static func shouldKeepResult(
+        _ book: SearchBook,
+        keyword: String,
+        mode: SearchMatchMode
+    ) -> Bool {
+        let normalizedKeyword = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedKeyword.isEmpty else { return false }
+
+        switch mode {
+        case .contains:
+            return true
+        case .exact:
+            return matchesKeyword(book, keyword: normalizedKeyword, mode: .exact)
+        }
+    }
+
+    /// 单本书与关键词的匹配判定，用于「精准搜索」过滤。
+    ///
+    /// 注意：这**不是**「搜索」模式的过滤条件；结果排序分层由
+    /// `SourceSearchResultAccumulator.matchScore` 负责。
     nonisolated static func matchesKeyword(
         _ book: SearchBook,
         keyword: String,

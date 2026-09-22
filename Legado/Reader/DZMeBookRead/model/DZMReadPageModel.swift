@@ -57,11 +57,32 @@ class DZMReadPageModel: NSObject,NSCoding {
     /// 获取显示内容(考虑可能会变换字体颜色的情况)
     var showContent:NSAttributedString! {
         
+        guard let content = content else { return nil }
+        
         let textColor = DZMReadConfigure.shared().textColor!
+        
+        // 整页富文本的复制 + 整段刷色是纯 CPU 开销，而滚动模式下 cell 复用会把同一个
+        // pageModel 反复取用。只要文字颜色和内容实例都没变，就没必要重算，直接复用上一次的结果。
+        if let cached = cachedShowContent,
+           cached.color == textColor,
+           cached.contentID == ObjectIdentifier(content) {
+            
+            return cached.attributed
+        }
+        
         let tempShowContent = NSMutableAttributedString(attributedString: content)
         tempShowContent.addAttributes([.foregroundColor : textColor], range: NSMakeRange(0, content.length))
-        return tempShowContent
+        
+        // 缓存不可变副本，调用方拿到的是 NSAttributedString，改不坏缓存
+        let attributed = NSAttributedString(attributedString: tempShowContent)
+        cachedShowContent = (color: textColor, contentID: ObjectIdentifier(content), attributed: attributed)
+        
+        return attributed
     }
+    
+    /// `showContent` 的缓存（文字颜色 + content 实例 -> 结果）。
+    /// 只用于运行时提速，不参与归档。
+    private var cachedShowContent:(color:UIColor, contentID:ObjectIdentifier, attributed:NSAttributedString)?
     
     // MARK: -- NSCoding
     

@@ -361,6 +361,41 @@ private final class DZMEmbeddedReadController: DZMReadController {
         requestChapter(relativeOffset: 1)
     }
 
+    // MARK: 字体 / 排版变更
+
+    /// 滚动模式下必须显式重排，否则改字号 / 字体 / 间距不会立即生效。
+    ///
+    /// 上游 `DZMReadController` 的这三个回调依赖
+    /// `GetCurrentReadViewController(isUpdateFont: true)` 去触发 `updateFont()`，
+    /// 但该方法在 `effectType == .scroll` 时直接返回 nil
+    /// （见 `DZMReadController+Operation.swift`）。本阅读器强制使用滚动模式，
+    /// 于是回调只重建了滚动控制器，而重建时读到的仍是旧的 `pageModels`，
+    /// 表现为「改完不生效，退出重进才生效」。
+    override func readMenuClickFont(readMenu: DZMReadMenu) {
+        applyTypographyChange()
+    }
+
+    override func readMenuClickFontSize(readMenu: DZMReadMenu) {
+        applyTypographyChange()
+    }
+
+    override func readMenuClickSpacing(readMenu: DZMReadMenu) {
+        applyTypographyChange()
+    }
+
+    /// 重排当前章节并重建滚动控制器。
+    ///
+    /// 先把可见页写回 `recordModel`，这样 `updateFont()` 读到的
+    /// `DZM_READ_RECORD_CURRENT_CHAPTER_LOCATION` 是最新的，重排后仍停在原位置。
+    private func applyTypographyChange() {
+        scrollController?.updateReadRecordForLifecycle()
+        // 先同步分页签名，让 `updateFont()` 内部的 `save()` 一次写对，
+        // 否则磁盘归档会带着旧签名，下次 `makeChapter` 判定缓存不可用而白重排一次。
+        readModel.recordModel.chapterModel?.paginationSignature = DZMNativeReadModelFactory.paginationSignature()
+        readModel.recordModel.updateFont()
+        creatPageController(displayController: GetCurrentReadViewController())
+    }
+
     override func catalogViewClickChapter(
         catalogView: DZMReadCatalogView,
         chapterListModel: DZMReadChapterListModel
@@ -663,7 +698,7 @@ enum DZMNativeReadModelFactory {
         return actual.map { Int($0.intValue) == expected } ?? false
     }
 
-    private static func paginationSignature() -> String {
+    static func paginationSignature() -> String {
         let bounds = DZM_READ_VIEW_RECT ?? .zero
         let configuration = DZMReadConfigure.shared()
         return [

@@ -18,6 +18,27 @@ enum LocalBookSupport {
         sourceURL == self.sourceURL
     }
 
+    /// 解析书籍对应的书源。
+    ///
+    /// 本地书的 `sourceUrl` 是 `"local"`，**不会**出现在书源列表里（它只是导入时写进
+    /// `BookEntity` 的一个标记，没有对应的 `BookSourceEntity` 记录）。如果调用方只按 URL
+    /// 在书源列表里找，本地书会被误判成「书源已删除」而打不开阅读器。
+    /// 这里统一兜住这个分支：本地书返回内置的本地书源，其余按 URL 匹配。
+    ///
+    /// - Parameter requireEnabled: 调用方本来就只接受启用书源的场景（如启动自动续读）传 `true`。
+    static func resolveSource(
+        for sourceURL: String,
+        in sources: [BookSource],
+        requireEnabled: Bool = false
+    ) -> BookSource? {
+        if isLocalSource(sourceURL) {
+            return source()
+        }
+        return sources.first {
+            $0.bookSourceUrl == sourceURL && (!requireEnabled || $0.enabled)
+        }
+    }
+
     static func makeBookURL(relativePath: String) -> String {
         "local://\(relativePath)"
     }

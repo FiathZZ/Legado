@@ -52,11 +52,12 @@ class DZMReadViewStatusBottomView: UIView {
         progress.textColor = DZMReadConfigure.shared().statusTextColor
         addSubview(progress)
         
-        // 初始化调用
-        didChangeTime()
-        
-        // 添加定时器
+        // 添加定时器（同时开启电量监测）
         addTimer()
+        
+        // 初始化调用。必须放在 addTimer() 之后：电量监测是在 addTimer() 里开启的，
+        // 在此之前读 `batteryLevel` 只会拿到 -1，首次打开会显示一个空电量图标。
+        didChangeTime()
     }
     
     override func layoutSubviews() {
@@ -127,6 +128,9 @@ class DZMReadViewStatusBottomView: UIView {
         }else{
             
             addTimer()
+            
+            // 重新进入窗口时立刻刷新一次，不必干等下一个 15 秒周期
+            didChangeTime()
         }
     }
     

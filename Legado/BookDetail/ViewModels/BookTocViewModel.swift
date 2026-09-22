@@ -71,62 +71,88 @@ final class BookTocViewModel: ObservableObject {
     }
 
     /// Restores locally available TOC/body state before any network request starts.
+    ///
+    /// This used to run fully synchronously on the main actor *before* the first `await` of the
+    /// reader handoff, so SwiftUI never got a chance to draw the "正在打开阅读器" state and the
+    /// bookshelf looked frozen for several seconds on large or fully downloaded books. The disk
+    /// probes, the TOC JSON decode and the per-chapter metadata reads now run detached; only the
+    /// cheap state assignment below stays on the main actor.
     @discardableResult
-    func restoreCachedChaptersIfAvailable() -> Bool {
+    func restoreCachedChaptersIfAvailable() async -> Bool {
         guard chapters.isEmpty else { return true }
         let cacheKey = ChapterCacheStore.makeKey(
             sourceUrl: source.bookSourceUrl,
             bookUrl: detail.bookUrl
         )
-        // A completed offline cache owns both TOC and content. Never refresh it in the
-        // background: opening a downloaded book must consume zero network traffic.
-        if let manifest = ChapterCacheStore.offlineBookManifest(bookKey: cacheKey) {
-            chapters = manifest.chapters
+        let entity = bookshelfViewModel?.bookEntity(for: detail.bookUrl)
+        let tocRecord = cachedTocRecord()
+        let request = TocRestoreRequest(
+            cacheKey: cacheKey,
+            bookUrl: detail.bookUrl,
+            fallbackIndex: max(entity?.currentChapterIndex ?? 0, 0),
+            fallbackName: entity?.currentChapterName,
+            tocJson: tocRecord?.json,
+            tocCachedAt: tocRecord?.cachedAt
+        )
+
+        let result = await Task.detached(priority: .userInitiated) {
+            Self.resolveRestore(request)
+        }.value
+
+        switch result {
+        case .offlineManifest(let restored):
+            // A completed offline cache owns both TOC and content. Never refresh it in the
+            // background: opening a downloaded book must consume zero network traffic.
+            chapters = restored
             hasCompleteTableOfContents = true
             syncChapterCount()
             errorMessage = nil
             return true
-        }
-        if let cached = loadCachedChapters() {
-            // Migrate an older complete body cache when its durable TOC is still available.
-            // Once promoted, every later reader and TOC entry is offline-only.
-            if cached.chapters.allSatisfy({
-                ChapterCacheStore.hasNonEmptyContent(bookKey: cacheKey, index: $0.index)
-            }) {
-                try? ChapterCacheStore.saveOfflineBookManifest(
-                    bookKey: cacheKey,
-                    chapters: cached.chapters
-                )
-                chapters = cached.chapters
-                hasCompleteTableOfContents = true
-                syncChapterCount()
-                errorMessage = nil
-                return true
-            }
-            chapters = chaptersExpandedThroughPersistedCache(cached.chapters)
+
+        case .cachedToc(let restored, let cachedAt):
+            chapters = restored
             hasCompleteTableOfContents = true
             syncChapterCount()
             errorMessage = nil
-            if cached.isExpired, !LocalBookSupport.isLocalSource(source.bookSourceUrl) {
+            if cachedAt.addingTimeInterval(CachePolicy.ttl) < .now,
+               !LocalBookSupport.isLocalSource(source.bookSourceUrl) {
                 refreshCachedTocInBackground(generation: tocLoadGeneration)
             }
             return true
+
+        case .fallback(let restored):
+            chapters = restored
+            hasCompleteTableOfContents = false
+            syncChapterCount()
+            errorMessage = nil
+            if !LocalBookSupport.isLocalSource(source.bookSourceUrl) {
+                refreshCachedTocInBackground(generation: tocLoadGeneration)
+            }
+            return true
+
+        case .unavailable:
+            return false
         }
-        guard let fallback = loadCachedCurrentChapterFallback() else { return false }
-        chapters = chaptersExpandedThroughPersistedCache(fallback)
-        hasCompleteTableOfContents = false
-        syncChapterCount()
-        errorMessage = nil
-        if !LocalBookSupport.isLocalSource(source.bookSourceUrl) {
-            refreshCachedTocInBackground(generation: tocLoadGeneration)
+    }
+
+    /// The SwiftData fetch itself stays on the main actor (the context is main-actor bound); only
+    /// the JSON string crosses over so the expensive decode can happen off-main.
+    private func cachedTocRecord() -> (json: String, cachedAt: Date)? {
+        guard let modelContext else { return nil }
+        let key = TocCacheEntity.cacheKey(for: detail.bookUrl)
+        let predicate = #Predicate<TocCacheEntity> { entity in
+            entity.cacheKey == key
         }
-        return true
+        var descriptor = FetchDescriptor<TocCacheEntity>(predicate: predicate)
+        descriptor.fetchLimit = 1
+        guard let entity = try? modelContext.fetch(descriptor).first else { return nil }
+        return (entity.chaptersJson, entity.cachedAt)
     }
 
     private func loadTocOnce(generation: UUID) async {
         guard generation == tocLoadGeneration, !Task.isCancelled else { return }
         guard chapters.isEmpty else { return }
-        if restoreCachedChaptersIfAvailable() {
+        if await restoreCachedChaptersIfAvailable() {
             return
         }
 
@@ -305,56 +331,61 @@ final class BookTocViewModel: ObservableObject {
         }
     }
 
-    private func loadCachedChapters() -> (chapters: [BookChapter], isExpired: Bool)? {
-        guard let modelContext else { return nil }
-        let key = TocCacheEntity.cacheKey(for: detail.bookUrl)
-        let predicate = #Predicate<TocCacheEntity> { entity in
-            entity.cacheKey == key
-        }
-        var descriptor = FetchDescriptor<TocCacheEntity>(predicate: predicate)
-        descriptor.fetchLimit = 1
+    // MARK: 缓存恢复（后台执行）
 
-        guard let entity = try? modelContext.fetch(descriptor).first,
-              let chapters = entity.toChapters(),
-              !chapters.isEmpty else {
-            return nil
+    /// Resolves the restore outcome entirely off the main actor. Every input is a value type and
+    /// every store call it makes is `nonisolated`, so this never touches UI state.
+    nonisolated private static func resolveRestore(_ request: TocRestoreRequest) -> TocRestoreResult {
+        if let manifest = ChapterCacheStore.offlineBookManifest(bookKey: request.cacheKey) {
+            return .offlineManifest(manifest.chapters)
         }
 
-        let isExpired = entity.cachedAt.addingTimeInterval(CachePolicy.ttl) < .now
-        return (chapters, isExpired)
+        if let json = request.tocJson,
+           let data = json.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode([BookChapter].self, from: data),
+           !decoded.isEmpty {
+            // Migrate an older complete body cache when its durable TOC is still available.
+            // Once promoted, every later reader and TOC entry is offline-only.
+            if decoded.allSatisfy({
+                ChapterCacheStore.hasNonEmptyContent(bookKey: request.cacheKey, index: $0.index)
+            }) {
+                try? ChapterCacheStore.saveOfflineBookManifest(
+                    bookKey: request.cacheKey,
+                    chapters: decoded
+                )
+                return .offlineManifest(decoded)
+            }
+            return .cachedToc(
+                chapters: expandedThroughPersistedCache(decoded, request: request),
+                cachedAt: request.tocCachedAt ?? .distantPast
+            )
+        }
+
+        guard let fallback = fallbackChapters(request) else { return .unavailable }
+        return .fallback(chapters: expandedThroughPersistedCache(fallback, request: request))
     }
 
-    private func loadCachedCurrentChapterFallback() -> [BookChapter]? {
-        guard let bookshelfViewModel,
-              let entity = bookshelfViewModel.bookEntity(for: detail.bookUrl) else {
-            return nil
-        }
-
-        let currentIndex = max(entity.currentChapterIndex, 0)
-        let cacheKey = ChapterCacheStore.makeKey(
-            sourceUrl: source.bookSourceUrl,
-            bookUrl: detail.bookUrl
-        )
-        let cachedIndices = ChapterCacheStore.cachedChapterIndices(bookKey: cacheKey)
+    /// Rebuilds the complete offline range from persisted chapter files. The old fallback
+    /// stopped at the recorded index, which made an already-downloaded next chapter look missing
+    /// and sent the native reader back to the network.
+    nonisolated private static func fallbackChapters(_ request: TocRestoreRequest) -> [BookChapter]? {
+        let cachedIndices = ChapterCacheStore.cachedChapterIndices(bookKey: request.cacheKey)
         guard !cachedIndices.isEmpty,
-              cachedIndices.contains(currentIndex) else {
+              cachedIndices.contains(request.fallbackIndex) else {
             return nil
         }
 
-        // Rebuild the complete offline range from persisted chapter files. The old fallback
-        // stopped at currentIndex, which made an already-downloaded next chapter look missing
-        // and sent the native reader back to the network.
-        let lastIndex = cachedIndices.max() ?? currentIndex
+        let lastIndex = cachedIndices.max() ?? request.fallbackIndex
         return (0...lastIndex).map { index in
-            let metadata = ChapterCacheStore.chapterMetadata(bookKey: cacheKey, index: index)
+            let metadata = ChapterCacheStore.chapterMetadata(bookKey: request.cacheKey, index: index)
             return BookChapter(
                 index: index,
-                title: metadata?.title ?? (index == currentIndex
-                    ? (entity.currentChapterName ?? "第\(index + 1)章")
+                title: metadata?.title ?? (index == request.fallbackIndex
+                    ? (request.fallbackName ?? "第\(index + 1)章")
                     : "第\(index + 1)章"),
                 url: metadata?.url ?? "",
                 baseUrl: metadata?.baseUrl ?? "",
-                bookUrl: (metadata?.bookUrl.isEmpty == false ? metadata?.bookUrl : nil) ?? detail.bookUrl,
+                bookUrl: (metadata?.bookUrl.isEmpty == false ? metadata?.bookUrl : nil) ?? request.bookUrl,
                 isVolume: metadata?.isVolume ?? false,
                 isVip: metadata?.isVip ?? false,
                 isPay: metadata?.isPay ?? false,
@@ -371,13 +402,12 @@ final class BookTocViewModel: ObservableObject {
     /// A TOC cache can be older than a completed body download. Keep its real titles and URLs,
     /// then append lightweight offline entries for cached chapters that are newer than that TOC.
     /// The reader can resolve those entries from ChapterCacheStore without touching the network.
-    private func chaptersExpandedThroughPersistedCache(_ cachedChapters: [BookChapter]) -> [BookChapter] {
+    nonisolated private static func expandedThroughPersistedCache(
+        _ cachedChapters: [BookChapter],
+        request: TocRestoreRequest
+    ) -> [BookChapter] {
         guard !cachedChapters.isEmpty else { return cachedChapters }
-        let cacheKey = ChapterCacheStore.makeKey(
-            sourceUrl: source.bookSourceUrl,
-            bookUrl: detail.bookUrl
-        )
-        guard let lastCachedIndex = ChapterCacheStore.cachedChapterIndices(bookKey: cacheKey).max(),
+        guard let lastCachedIndex = ChapterCacheStore.cachedChapterIndices(bookKey: request.cacheKey).max(),
               lastCachedIndex >= cachedChapters.count else {
             return cachedChapters
         }
@@ -385,14 +415,14 @@ final class BookTocViewModel: ObservableObject {
         var expanded = cachedChapters
         let existingIndices = Set(expanded.map(\.index))
         for index in expanded.count...lastCachedIndex where !existingIndices.contains(index) {
-            let metadata = ChapterCacheStore.chapterMetadata(bookKey: cacheKey, index: index)
+            let metadata = ChapterCacheStore.chapterMetadata(bookKey: request.cacheKey, index: index)
             expanded.append(
                 BookChapter(
                     index: index,
                     title: metadata?.title ?? "第\(index + 1)章",
                     url: metadata?.url ?? "",
                     baseUrl: metadata?.baseUrl ?? "",
-                    bookUrl: (metadata?.bookUrl.isEmpty == false ? metadata?.bookUrl : nil) ?? detail.bookUrl,
+                    bookUrl: (metadata?.bookUrl.isEmpty == false ? metadata?.bookUrl : nil) ?? request.bookUrl,
                     isVolume: metadata?.isVolume ?? false,
                     isVip: metadata?.isVip ?? false,
                     isPay: metadata?.isPay ?? false,
@@ -480,6 +510,25 @@ final class BookTocViewModel: ObservableObject {
             bookshelfViewModel?.loadBooks()
         }
     }
+}
+
+/// Value-only inputs for the off-main cache restore. Keeping this a plain `Sendable` struct is
+/// what lets the whole disk + decode pass run detached from the main actor.
+private struct TocRestoreRequest: Sendable {
+    let cacheKey: String
+    let bookUrl: String
+    let fallbackIndex: Int
+    let fallbackName: String?
+    let tocJson: String?
+    let tocCachedAt: Date?
+}
+
+/// Outcome of the off-main restore. The main actor only applies this; it never inspects the disk.
+private enum TocRestoreResult: Sendable {
+    case offlineManifest([BookChapter])
+    case cachedToc(chapters: [BookChapter], cachedAt: Date)
+    case fallback(chapters: [BookChapter])
+    case unavailable
 }
 
 /// SwiftData stores the directory as one JSON string. A malformed source can attach a large

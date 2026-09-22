@@ -46,7 +46,15 @@ class DZMReadViewScrollController: DZMViewController,UITableViewDelegate,UITable
         super.viewDidLoad()
         
         // 阅读记录开始阅读
-        chapterIDs.append(vc.readModel.recordModel.chapterModel.id)
+        let currentChapter = vc.readModel.recordModel.chapterModel!
+        chapterIDs.append(currentChapter.id)
+
+        // `DZMNativeReadModelFactory` already unarchived (or freshly built) this chapter and handed
+        // it to `recordModel.chapterModel`. Seeding the lookup table here lets the table-view data
+        // source below reuse that object instead of running a second full-chapter
+        // `NSKeyedUnarchiver` on the main thread: `GetChapterModel` used to decode the very same
+        // chapter again because its own `chapterModels` cache starts empty on every reader build.
+        chapterModels[currentChapter.id.stringValue] = currentChapter
         
         // 刷新阅读进度
         reloadProgress()

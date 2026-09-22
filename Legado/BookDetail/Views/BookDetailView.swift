@@ -356,7 +356,7 @@ struct BookDetailView: View {
         isOpeningReader = true
         defer { isOpeningReader = false }
 
-        let restoredFromCache = tocVM.restoreCachedChaptersIfAvailable()
+        let restoredFromCache = await tocVM.restoreCachedChaptersIfAvailable()
         if !restoredFromCache {
             await tocVM.loadToc()
         } else {

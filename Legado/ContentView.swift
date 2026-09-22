@@ -10,6 +10,8 @@ struct ContentView: View {
     @StateObject private var bookSourceViewModel: BookSourceManagerViewModel
     @State private var startupReaderRoute: StartupReaderRoute?
     @State private var hasResolvedStartupReader = false
+    /// 启动时自动进入上次阅读的书籍，可在「设置 → 启动」里关闭
+    @AppStorage(AppPreferenceKeys.restoreLastReaderOnLaunch) private var restoreLastReaderOnLaunch = true
 
     init(modelContext: ModelContext) {
         _bookshelfViewModel = StateObject(wrappedValue: BookshelfViewModel(modelContext: modelContext))
@@ -85,12 +87,17 @@ struct ContentView: View {
         guard !hasResolvedStartupReader else { return }
         hasResolvedStartupReader = true
 
+        // 「设置 → 启动 → 启动时打开上次阅读」关掉后，启动就停在书架
+        guard restoreLastReaderOnLaunch else { return }
+
         guard let book = bookshelfViewModel.books
             .filter({ $0.lastReadTime != nil })
             .max(by: { ($0.lastReadTime ?? .distantPast) < ($1.lastReadTime ?? .distantPast) }),
-              let source = bookSourceViewModel.bookSources.first(where: {
-                  $0.bookSourceUrl == book.sourceUrl && $0.enabled
-              }) else {
+              let source = LocalBookSupport.resolveSource(
+                  for: book.sourceUrl,
+                  in: bookSourceViewModel.bookSources,
+                  requireEnabled: true
+              ) else {
             return
         }
 

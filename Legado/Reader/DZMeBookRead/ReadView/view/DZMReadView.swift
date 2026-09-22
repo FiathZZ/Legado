@@ -15,7 +15,7 @@ class DZMReadView: UIView {
         
         didSet{
             
-            frameRef = DZMCoreText.GetFrameRef(attrString: pageModel.showContent, rect: CGRect(origin: CGPoint.zero, size: pageModel.contentSize))
+            applyFrameRef(content: pageModel.showContent, size: pageModel.contentSize ?? DZM_READ_VIEW_RECT.size)
         }
     }
     
@@ -24,7 +24,7 @@ class DZMReadView: UIView {
         
         didSet{
             
-            frameRef = DZMCoreText.GetFrameRef(attrString: content, rect: CGRect(origin: CGPoint.zero, size: DZM_READ_VIEW_RECT.size))
+            applyFrameRef(content: content, size: DZM_READ_VIEW_RECT.size)
         }
     }
     
@@ -35,6 +35,38 @@ class DZMReadView: UIView {
             
             if frameRef != nil { setNeedsDisplay() }
         }
+    }
+    
+    /// 上一次构建 frameRef 用的内容与范围
+    private weak var lastFrameContent:NSAttributedString?
+    
+    private var lastFrameSize:CGSize?
+    
+    /// 按需构建 frameRef
+    ///
+    /// `pageModel.showContent` 在文字颜色没变时返回的是同一个实例，而滚动模式下 cell 复用
+    /// 会把同一个 pageModel 反复赋进来。内容和范围都没变时可以直接复用已有的 CTFrame，
+    /// 省掉一次整页 CoreText 排版（`CTFramesetterCreateWithAttributedString` + `CreateFrame`）。
+    private func applyFrameRef(content:NSAttributedString?, size:CGSize) {
+        
+        if let frameRef = frameRef,
+           let content = content,
+           lastFrameContent === content,
+           lastFrameSize == size {
+            
+            // CTFrame 可以复用，但 cell 复用后 readView 的 bounds 可能已经变了，
+            // 必须显式重绘，否则屏幕上显示的是被拉伸的旧内容
+            setNeedsDisplay()
+            
+            return
+        }
+        
+        lastFrameContent = content
+        
+        lastFrameSize = size
+        
+        // 空内容也要能画（原来传 nil 会崩）
+        frameRef = DZMCoreText.GetFrameRef(attrString: content ?? NSAttributedString(), rect: CGRect(origin: CGPoint.zero, size: size))
     }
     
     override init(frame: CGRect) {

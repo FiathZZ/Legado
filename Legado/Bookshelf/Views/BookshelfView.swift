@@ -273,7 +273,7 @@ struct BookshelfView: View {
                 ForEach(viewModel.displayBooks, id: \.bookUrl) { book in
                     BookCoverCell(
                         book: book,
-                        source: allSources.first(where: { $0.bookSourceUrl == book.sourceUrl }),
+                        source: LocalBookSupport.resolveSource(for: book.sourceUrl, in: allSources),
                         isEditing: viewModel.isEditing,
                         isSelected: viewModel.selectedBookURLs.contains(book.bookUrl),
                         onDetail: {
@@ -359,7 +359,8 @@ struct BookshelfView: View {
     }
 
     private func openReader(for book: BookEntity) {
-        guard let source = allSources.first(where: { $0.bookSourceUrl == book.sourceUrl }) else {
+        // 本地书没有对应的书源记录，走 `resolveSource` 拿内置的本地书源
+        guard let source = LocalBookSupport.resolveSource(for: book.sourceUrl, in: allSources) else {
             readerLaunchError = ReaderLaunchError(
                 bookURL: book.bookUrl,
                 message: "该书籍对应的书源已被删除或禁用"
@@ -634,7 +635,7 @@ struct BookshelfReaderRouteView: View {
 
     @MainActor
     private func prepareReader() async {
-        let restoredFromCache = tocViewModel.restoreCachedChaptersIfAvailable()
+        let restoredFromCache = await tocViewModel.restoreCachedChaptersIfAvailable()
         if !restoredFromCache {
             await tocViewModel.loadToc()
         } else {

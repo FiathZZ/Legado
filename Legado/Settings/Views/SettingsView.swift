@@ -9,10 +9,24 @@ struct SettingsView: View {
     @State private var progressMessage = ""
     @State private var alertState: SettingsAlertState?
     @State private var showClearAllCacheConfirmation = false
+    /// 启动时自动进入上次阅读的书籍
+    @AppStorage(AppPreferenceKeys.restoreLastReaderOnLaunch) private var restoreLastReaderOnLaunch = true
 
     var body: some View {
         NavigationStack {
             List {
+                Section("启动") {
+                    Toggle(isOn: $restoreLastReaderOnLaunch) {
+                        SettingsOverviewRow(
+                            icon: "book.pages",
+                            title: "启动时打开上次阅读",
+                            detail: "开启后，启动应用会自动进入上次阅读的书籍"
+                        )
+                    }
+                    .tint(themeManager.color(.accent))
+                    .themedSurfaceListRow()
+                }
+
                 Section("外观") {
                     NavigationLink(destination: ThemeManagementView().toolbar(.hidden, for: .tabBar)) {
                         SettingsOverviewRow(
@@ -88,15 +102,12 @@ struct SettingsView: View {
                 }
 
                 Section("关于") {
-                    HStack {
+                    NavigationLink(destination: AboutView().toolbar(.hidden, for: .tabBar)) {
                         SettingsOverviewRow(
                             icon: "info.circle",
-                            title: "版本",
-                            detail: "当前已安装版本"
+                            title: "关于",
+                            detail: "版本、开发人员、开源许可与免责声明"
                         )
-                        Spacer()
-                        Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—")
-                            .foregroundStyle(themeManager.color(.secondaryText))
                     }
                     .themedSurfaceListRow()
                 }
@@ -250,4 +261,14 @@ private enum SettingsSheet: Identifiable {
             return "import-local-book"
         }
     }
+}
+
+/// 应用级偏好开关的存储 key。
+///
+/// 统一用 `@AppStorage` 读写：key 从未写入过时会取 `@AppStorage` 声明的默认值。
+/// 所以默认值只在声明处给一次，读取方不要改用 `UserDefaults.bool(forKey:)`，
+/// 那条路径在 key 不存在时返回 `false`，会把默认行为改掉。
+enum AppPreferenceKeys {
+    /// 启动时自动打开上次阅读的书籍
+    static let restoreLastReaderOnLaunch = "legado.preference.restoreLastReaderOnLaunch"
 }

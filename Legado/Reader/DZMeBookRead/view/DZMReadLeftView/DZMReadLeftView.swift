@@ -29,6 +29,10 @@ class DZMReadLeftView: UIView,DZMSegmentedControlDelegate {
     // 书签
     private(set) var markView:DZMReadMarkView!
     
+    /// 上一次刷新目录表时用的状态（日夜间 / 当前章节 / 章节总数）。
+    /// 用来跳过「打开目录」路径上状态没变时的无谓整表 reload。
+    private var catalogReloadState:String?
+    
     override init(frame: CGRect) {
         
         super.init(frame: frame)
@@ -74,7 +78,9 @@ class DZMReadLeftView: UIView,DZMSegmentedControlDelegate {
     func updateUI() {
         
         // 日夜间切换修改
-        if DZMUserDefaults.bool(DZM_READ_KEY_MODE_DAY_NIGHT) {
+        let isDayNight = DZMUserDefaults.bool(DZM_READ_KEY_MODE_DAY_NIGHT)
+        
+        if isDayNight {
             
             spaceLine.backgroundColor = DZM_COLOR_230_230_230.withAlphaComponent(0.2)
             
@@ -88,7 +94,23 @@ class DZMReadLeftView: UIView,DZMSegmentedControlDelegate {
         }
         
         // 刷新分割线颜色(如果不需要刷新分割线颜色可以去掉,目前我是做了日夜间修改分割线颜色的操作)
-        catalogView.tableView.reloadData()
+        //
+        // 目录表只在「日夜间模式 / 当前章节 / 章节总数」变化时才需要整表 reload，
+        // 三者都没变说明表里已经是最新状态（例如刚打开过目录、关掉、又打开）。
+        // 章节数可能上千，省下的是实打实的一次全表重建。
+        let chapterID = catalogView.readModel?.recordModel.chapterModel?.id
+        let rowCount = catalogView.readModel?.chapterListModels?.count ?? 0
+        let state = "\(isDayNight)|\(chapterID.map { "\($0)" } ?? "-")|\(rowCount)"
+        
+        if catalogReloadState != state {
+            
+            catalogReloadState = state
+            
+            catalogView.tableView.reloadData()
+        }
+        
+        // 书签表保持每次刷新：书签数量的变化不会体现在上面的状态里，
+        // 而且 `DZMSegmentedControl` 切到书签页时只改 alpha、不重新加载，漏刷会显示旧数据。
         markView.tableView.reloadData()
     }
     

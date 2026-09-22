@@ -87,15 +87,20 @@ struct DZMNativeReaderSnapshot: Equatable {
 }
 
 enum DZMReaderChapterTitleResolver {
+    /// 解析菜单栏要显示的章节名。
+    ///
+    /// 以原生记录里的**当前章节名**为准：连续滚动模式可以跨章滚动，而进入阅读器时写入的
+    /// `snapshotTitle` 会一直停留在当时那一章，优先用它会让标题卡在旧章节上
+    /// （看到第五章、标题还是第二章）。
+    /// 只有当记录缺失、为空、或仍是占位名 `(无章节名)` 时才回退到快照
+    /// —— 这也覆盖了「旧归档记录名称为空」的情况。
     static func resolve(snapshotTitle: String, recordChapterTitle: String?) -> String {
-        let snapshot = snapshotTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        // The native engine can restore an old record whose name is empty or the generic
-        // placeholder. The current directory snapshot is authoritative for the visible title.
-        if !snapshot.isEmpty {
-            return snapshot
+        let recordTitle = recordChapterTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !recordTitle.isEmpty, recordTitle != "(无章节名)" {
+            return recordTitle
         }
-        let currentTitle = recordChapterTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return currentTitle.isEmpty || currentTitle == "(无章节名)" ? "阅读中" : currentTitle
+        let snapshot = snapshotTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        return snapshot.isEmpty ? "阅读中" : snapshot
     }
 }
 

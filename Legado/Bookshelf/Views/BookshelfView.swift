@@ -21,6 +21,7 @@ struct BookshelfView: View {
     @State private var showDeleteConfirmation = false
     @State private var navigationTarget: BookshelfNavigationTarget?
     @State private var readerRoute: BookshelfReaderRoute?
+    @State private var preparingReaderBookURL: String?
     @State private var readerLaunchError: ReaderLaunchError?
     @State private var exportItem: ExportShareItem?
     @State private var exportErrorMessage: String?
@@ -359,6 +360,7 @@ struct BookshelfView: View {
     }
 
     private func openReader(for book: BookEntity) {
+        guard preparingReaderBookURL == nil else { return }
         // 本地书没有对应的书源记录，走 `resolveSource` 拿内置的本地书源
         guard let source = LocalBookSupport.resolveSource(for: book.sourceUrl, in: allSources) else {
             readerLaunchError = ReaderLaunchError(
@@ -367,14 +369,43 @@ struct BookshelfView: View {
             )
             return
         }
-        readerRoute = BookshelfReaderRoute(
-            book: book,
-            source: source,
-            cachedSession: ReaderSessionCache.shared.session(
-                bookID: book.bookUrl,
-                sourceURL: source.bookSourceUrl
+        if let session = ReaderSessionCache.shared.session(bookID: book.bookUrl, sourceURL: source.bookSourceUrl) {
+            readerRoute = BookshelfReaderRoute(book: book, source: source, cachedSession: session)
+            return
+        }
+
+        let cacheKey = ChapterCacheStore.makeKey(sourceUrl: source.bookSourceUrl, bookUrl: book.bookUrl)
+        guard ChapterCacheStore.hasNonEmptyContent(bookKey: cacheKey, index: book.currentChapterIndex) else {
+            readerRoute = BookshelfReaderRoute(book: book, source: source, cachedSession: nil)
+            return
+        }
+
+        preparingReaderBookURL = book.bookUrl
+        Task { @MainActor in
+            defer { preparingReaderBookURL = nil }
+            let toc = BookTocViewModel(
+                detail: book.toBookDetail(),
+                source: source,
+                bookshelfViewModel: viewModel
             )
-        )
+            toc.allSources = allSources
+            if await toc.restoreCachedChaptersIfAvailable(),
+               let result = toc.makeReaderViewModel(startIndex: book.currentChapterIndex) {
+                await result.vm.loadCurrentChapter()
+                if let content = result.vm.currentContent,
+                   !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let session = ReaderSession(viewModel: result.vm, bookID: result.bookID)
+                    ReaderSessionCache.shared.store(session)
+                    readerRoute = BookshelfReaderRoute(book: book, source: source, cachedSession: session)
+                    Task { @MainActor in
+                        await toc.waitForBackgroundTocRefresh()
+                        result.vm.updateChapters(toc.chapters, hasCompleteTableOfContents: toc.hasCompleteTableOfContents)
+                    }
+                    return
+                }
+            }
+            readerRoute = BookshelfReaderRoute(book: book, source: source, cachedSession: nil)
+        }
     }
 
     private var batchToolbar: some View {

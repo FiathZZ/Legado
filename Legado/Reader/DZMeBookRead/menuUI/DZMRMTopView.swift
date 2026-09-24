@@ -21,6 +21,7 @@ class DZMRMTopView: DZMRMBaseView {
 
     /// 全书缓存状态图标
     private var cacheEntireBookButton: UIButton!
+    private var cacheProgressRing: CAShapeLayer!
 
     override init(frame: CGRect) { super.init(frame: frame) }
     
@@ -48,6 +49,13 @@ class DZMRMTopView: DZMRMBaseView {
         cacheEntireBookButton.accessibilityLabel = "缓存整本书"
         cacheEntireBookButton.addTarget(self, action: #selector(clickCacheEntireBook), for: .touchUpInside)
         addSubview(cacheEntireBookButton)
+        cacheProgressRing = CAShapeLayer()
+        cacheProgressRing.fillColor = UIColor.clear.cgColor
+        cacheProgressRing.strokeColor = DZM_READ_COLOR_MENU_COLOR.cgColor
+        cacheProgressRing.lineWidth = 2.5
+        cacheProgressRing.lineCap = .round
+        cacheProgressRing.isHidden = true
+        cacheEntireBookButton.layer.addSublayer(cacheProgressRing)
         updateCacheEntireBook(state: .available)
     }
     
@@ -69,7 +77,7 @@ class DZMRMTopView: DZMRMBaseView {
     }
 
     /// Updates the full-book cache affordance without changing the reader menu layout.
-    /// A checkmark is only supplied by the reader bridge after every chapter is on disk.
+    /// The reader bridge supplies a checkmark when the current chapter through the end is cached.
     func updateCacheEntireBook(state: ReaderBookCacheState) {
         let symbolName: String
         let accessibilityValue: String
@@ -95,6 +103,27 @@ class DZMRMTopView: DZMRMBaseView {
         )
         cacheEntireBookButton.isEnabled = state == .available
         cacheEntireBookButton.accessibilityValue = accessibilityValue
+        cacheProgressRing.isHidden = true
+        cacheEntireBookButton.setTitle(nil, for: .normal)
+    }
+
+    func updateCacheProgress(_ progress: Double?) {
+        guard let progress, progress >= 0, progress < 1 else {
+            cacheProgressRing.isHidden = true
+            return
+        }
+        let percent = Int((progress * 100).rounded())
+        cacheEntireBookButton.setImage(nil, for: .normal)
+        cacheEntireBookButton.setTitle(nil, for: .normal)
+        cacheEntireBookButton.isEnabled = false
+        cacheEntireBookButton.accessibilityValue = "缓存中\(percent)%"
+        cacheProgressRing.isHidden = false
+        let center = CGPoint(x: cacheEntireBookButton.bounds.midX, y: cacheEntireBookButton.bounds.midY)
+        let radius = min(cacheEntireBookButton.bounds.width, cacheEntireBookButton.bounds.height) / 2 - 8
+        let path = UIBezierPath(arcCenter: center, radius: radius, startAngle: -.pi / 2, endAngle: 3 * .pi / 2, clockwise: true)
+        cacheProgressRing.frame = cacheEntireBookButton.bounds
+        cacheProgressRing.path = path.cgPath
+        cacheProgressRing.strokeEnd = CGFloat(max(0, min(progress, 1)))
     }
     
     override func layoutSubviews() {
@@ -113,6 +142,7 @@ class DZMRMTopView: DZMRMBaseView {
             width: cacheWidth,
             height: wh
         )
+        cacheProgressRing.frame = cacheEntireBookButton.bounds
         chapterTitleLabel.frame = CGRect(
             x: wh,
             y: y,

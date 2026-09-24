@@ -5,6 +5,7 @@ import CommonCrypto
 /// 章节正文文件缓存，保存到 Application Support/ChapterCache。
 struct ChapterCacheStore {
     nonisolated private static let rootDirectoryName = "ChapterCache"
+    private static let writeLock = NSLock()
 
     /// The durable boundary of a completed offline book. A body file alone is an incremental
     /// cache; only this manifest means the TOC and every chapter are available offline.
@@ -40,8 +41,22 @@ struct ChapterCacheStore {
 
     nonisolated static func saveOfflineBookManifest(bookKey: String, chapters: [BookChapter]) throws {
         guard !chapters.isEmpty else { return }
-        let manifest = OfflineBookManifest(chapters: chapters)
-        try persist(data: JSONEncoder().encode(manifest), to: offlineManifestFileURL(bookKey: bookKey))
+        let manifest = OfflineBookManifest(chapters: chapters.map(Self.sanitizedChapter))
+        let data = try JSONEncoder().encode(manifest)
+        try withWriteLock {
+            try persist(data: data, to: offlineManifestFileURL(bookKey: bookKey))
+        }
+    }
+
+    private nonisolated static func sanitizedChapter(_ chapter: BookChapter) -> BookChapter {
+        var copy = chapter
+        // The manifest only needs the stable TOC identity. Large parser variables can make the
+        // JSON unexpectedly huge and have caused failures during atomic manifest replacement.
+        copy.variables = [:]
+        copy.sourceVariables = [:]
+        copy.bookVariables = [:]
+        copy.chapterVariables = [:]
+        return copy
     }
 
     nonisolated static func isOfflineBookComplete(bookKey: String) -> Bool {
@@ -81,17 +96,19 @@ struct ChapterCacheStore {
         chapter: BookChapter? = nil,
         contentRuleRevision: Int? = nil
     ) throws {
-        let fileURL = chapterFileURL(bookKey: bookKey, index: index)
-        try persist(content: content, to: fileURL)
-        if let chapter, let data = try? JSONEncoder().encode(chapter) {
-            try persist(data: data, to: chapterMetadataFileURL(bookKey: bookKey, index: index))
-        }
+        try withWriteLock {
+            let fileURL = chapterFileURL(bookKey: bookKey, index: index)
+            try persist(content: content, to: fileURL)
+            if let chapter, let data = try? JSONEncoder().encode(chapter) {
+                try persist(data: data, to: chapterMetadataFileURL(bookKey: bookKey, index: index))
+            }
 
-        let revisionURL = chapterRuleRevisionFileURL(bookKey: bookKey, index: index)
-        if let contentRuleRevision {
-            try persist(content: String(contentRuleRevision), to: revisionURL)
-        } else {
-            try? FileManager.default.removeItem(at: revisionURL)
+            let revisionURL = chapterRuleRevisionFileURL(bookKey: bookKey, index: index)
+            if let contentRuleRevision {
+                try persist(content: String(contentRuleRevision), to: revisionURL)
+            } else {
+                try? FileManager.default.removeItem(at: revisionURL)
+            }
         }
     }
 
@@ -212,7 +229,33 @@ struct ChapterCacheStore {
     nonisolated private static func persist(data: Data, to fileURL: URL) throws {
         let directoryURL = fileURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
-        try data.write(to: fileURL, options: [.atomic])
+        let temporaryURL = directoryURL.appendingPathComponent(".manifest-\(UUID().uuidString).tmp")
+        do {
+            // Do not require complete file protection here. A manifest can be written while the
+            // app is transitioning to the background, when that protection class may be locked.
+            try data.write(to: temporaryURL, options: [.atomic])
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                _ = try FileManager.default.replaceItemAt(
+                    fileURL,
+                    withItemAt: temporaryURL,
+                    backupItemName: nil,
+                    options: .usingNewMetadataOnly
+                )
+            } else {
+                try FileManager.default.moveItem(at: temporaryURL, to: fileURL)
+            }
+        } catch {
+            // A failed atomic write must not leave a stale temporary manifest around. Preserve the
+            // original error so callers can report the actual filesystem failure.
+            try? FileManager.default.removeItem(at: temporaryURL)
+            throw error
+        }
+    }
+
+    nonisolated private static func withWriteLock<T>(_ body: () throws -> T) rethrows -> T {
+        writeLock.lock()
+        defer { writeLock.unlock() }
+        return try body()
     }
 
     nonisolated private static func bookDirectoryURL(bookKey: String) -> URL {

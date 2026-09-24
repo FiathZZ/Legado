@@ -5,6 +5,7 @@ struct ReaderChapterListView: View {
 
     let chapters: [BookChapter]
     let currentIndex: Int
+    let isChapterCached: (BookChapter) -> Bool
     let onSelectChapter: (Int) -> Void
 
     var body: some View {
@@ -21,6 +22,11 @@ struct ReaderChapterListView: View {
                         if index == currentIndex {
                             Image(systemName: "book.fill")
                                 .foregroundStyle(Color.accentColor)
+                        }
+                        if !chapters[index].isVolume, isChapterCached(chapters[index]) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                                .accessibilityLabel("已缓存")
                         }
                     }
                     .padding(.vertical, 6)

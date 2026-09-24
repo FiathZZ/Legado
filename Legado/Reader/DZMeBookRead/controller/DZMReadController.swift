@@ -10,6 +10,11 @@ import UIKit
 
 class DZMReadController: DZMViewController,DZMReadMenuDelegate,UIPageViewControllerDelegate,UIPageViewControllerDataSource,DZMPageViewControllerDelegate,DZMCoverControllerDelegate,DZMReadContentViewDelegate,DZMReadCatalogViewDelegate,DZMReadMarkViewDelegate {
 
+    /// Optional cache indicator used by the host app's offline reader.
+    var isChapterCached: ((Int) -> Bool)? {
+        didSet { leftView?.isChapterCached = isChapterCached }
+    }
+
     // MARK: 数据相关
     
     /// 阅读对象
@@ -100,6 +105,7 @@ class DZMReadController: DZMViewController,DZMReadMenuDelegate,UIPageViewControl
         
         // 目录侧滑栏
         leftView = DZMReadLeftView()
+        leftView.isChapterCached = isChapterCached
         leftView.catalogView.readModel = readModel
         leftView.catalogView.delegate = self
         leftView.markView.readModel = readModel

@@ -12,6 +12,7 @@ struct DZMNativeReaderView: UIViewControllerRepresentable {
     let onChapterRequested: (Int) -> Void
     let onReadingPositionChanged: (ReaderPosition, Bool) -> Void
     let onCacheEntireBook: () -> Void
+    let isChapterCached: (Int) -> Bool
 
     func makeUIViewController(context: Context) -> DZMNativeReaderHostController {
         let controller = DZMNativeReaderHostController()
@@ -22,7 +23,9 @@ struct DZMNativeReaderView: UIViewControllerRepresentable {
             onChapterRequested: onChapterRequested,
             onReadingPositionChanged: onReadingPositionChanged,
             onCacheEntireBook: onCacheEntireBook,
-            cacheState: readerViewModel.entireBookCacheState
+            cacheState: readerViewModel.entireBookCacheState,
+            cacheProgress: readerViewModel.isDownloading ? readerViewModel.downloadProgress : nil
+            , isChapterCached: isChapterCached
         )
         return controller
     }
@@ -35,7 +38,9 @@ struct DZMNativeReaderView: UIViewControllerRepresentable {
             onChapterRequested: onChapterRequested,
             onReadingPositionChanged: onReadingPositionChanged,
             onCacheEntireBook: onCacheEntireBook,
-            cacheState: readerViewModel.entireBookCacheState
+            cacheState: readerViewModel.entireBookCacheState,
+            cacheProgress: readerViewModel.isDownloading ? readerViewModel.downloadProgress : nil
+            , isChapterCached: isChapterCached
         )
     }
 
@@ -120,6 +125,8 @@ final class DZMNativeReaderHostController: UIViewController {
     private var previousInteractivePopGestureState: Bool?
     private var onCacheEntireBook: () -> Void = {}
     private var cacheState: ReaderBookCacheState = .available
+    private var cacheProgress: Double?
+    private var isChapterCached: (Int) -> Bool = { _ in false }
     private var chapterContentProvider: (Int, @escaping (String?) -> Void) -> Void = { _, completion in
         completion(nil)
     }
@@ -192,14 +199,19 @@ final class DZMNativeReaderHostController: UIViewController {
         onChapterRequested: @escaping (Int) -> Void,
         onReadingPositionChanged: @escaping (ReaderPosition, Bool) -> Void,
         onCacheEntireBook: @escaping () -> Void,
-        cacheState: ReaderBookCacheState
+        cacheState: ReaderBookCacheState,
+        cacheProgress: Double?,
+        isChapterCached: @escaping (Int) -> Bool
     ) {
         self.onBackRequested = onBackRequested
         self.onChapterRequested = onChapterRequested
         self.onReadingPositionChanged = onReadingPositionChanged
         self.onCacheEntireBook = onCacheEntireBook
         self.cacheState = cacheState
+        self.cacheProgress = cacheProgress
+        self.isChapterCached = isChapterCached
         self.chapterContentProvider = chapterContentProvider
+        readerController?.isChapterCached = isChapterCached
 
         guard let snapshot else { return }
         guard displayedIdentity != snapshot.identity else {
@@ -209,7 +221,9 @@ final class DZMNativeReaderHostController: UIViewController {
                 onReadingPositionChanged: onReadingPositionChanged,
                 onCacheEntireBook: onCacheEntireBook,
                 chapterTitle: snapshot.chapterTitle,
-                cacheState: cacheState
+                cacheState: cacheState,
+                cacheProgress: cacheProgress,
+                isChapterCached: isChapterCached
             )
             return
         }
@@ -281,13 +295,16 @@ final class DZMNativeReaderHostController: UIViewController {
             from: snapshot,
             chapterContentProvider: chapterContentProvider
         )
+        controller.isChapterCached = isChapterCached
         controller.updateCallbacks(
             onBackRequested: onBackRequested,
             onChapterRequested: onChapterRequested,
             onReadingPositionChanged: onReadingPositionChanged,
             onCacheEntireBook: onCacheEntireBook,
             chapterTitle: snapshot.chapterTitle,
-            cacheState: cacheState
+            cacheState: cacheState,
+            cacheProgress: cacheProgress,
+            isChapterCached: isChapterCached
         )
 
         addChild(controller)
@@ -308,14 +325,16 @@ private final class DZMEmbeddedReadController: DZMReadController {
     private var onCacheEntireBook: () -> Void = {}
     private var chapterTitle: String = ""
     private var cacheState: ReaderBookCacheState = .available
-
+    private var cacheProgress: Double?
     func updateCallbacks(
         onBackRequested: @escaping (ReaderPosition?) -> Void,
         onChapterRequested: @escaping (Int) -> Void,
         onReadingPositionChanged: @escaping (ReaderPosition, Bool) -> Void,
         onCacheEntireBook: @escaping () -> Void,
         chapterTitle: String,
-        cacheState: ReaderBookCacheState
+        cacheState: ReaderBookCacheState,
+        cacheProgress: Double?,
+        isChapterCached: @escaping (Int) -> Bool
     ) {
         self.onBackRequested = onBackRequested
         self.onChapterRequested = onChapterRequested
@@ -323,6 +342,9 @@ private final class DZMEmbeddedReadController: DZMReadController {
         self.onCacheEntireBook = onCacheEntireBook
         self.chapterTitle = chapterTitle
         self.cacheState = cacheState
+        self.cacheProgress = cacheProgress
+        self.isChapterCached = isChapterCached
+        readMenu?.topView.updateCacheProgress(cacheProgress)
         updateMenuChrome()
     }
 
@@ -335,6 +357,7 @@ private final class DZMEmbeddedReadController: DZMReadController {
         guard isViewLoaded else { return }
         updateMenuChapterTitle()
         readMenu?.topView.updateCacheEntireBook(state: cacheState)
+        readMenu?.topView.updateCacheProgress(cacheProgress)
     }
 
     private func updateMenuChapterTitle() {

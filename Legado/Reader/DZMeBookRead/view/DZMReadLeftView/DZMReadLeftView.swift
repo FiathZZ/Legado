@@ -25,6 +25,16 @@ class DZMReadLeftView: UIView,DZMSegmentedControlDelegate {
     
     // 目录
     private(set) var catalogView:DZMReadCatalogView!
+
+    /// Cache status is supplied by the SwiftUI reader. Keep it on the left drawer itself so
+    /// every table reload, including reopening the drawer, evaluates the current disk state.
+    var isChapterCached: ((Int) -> Bool)? {
+        get { catalogView.isChapterCached }
+        set {
+            catalogView.isChapterCached = newValue
+            cacheStatusRevision &+= 1
+        }
+    }
     
     // 书签
     private(set) var markView:DZMReadMarkView!
@@ -32,6 +42,7 @@ class DZMReadLeftView: UIView,DZMSegmentedControlDelegate {
     /// 上一次刷新目录表时用的状态（日夜间 / 当前章节 / 章节总数）。
     /// 用来跳过「打开目录」路径上状态没变时的无谓整表 reload。
     private var catalogReloadState:String?
+    private var cacheStatusRevision: Int = 0
     
     override init(frame: CGRect) {
         
@@ -100,7 +111,7 @@ class DZMReadLeftView: UIView,DZMSegmentedControlDelegate {
         // 章节数可能上千，省下的是实打实的一次全表重建。
         let chapterID = catalogView.readModel?.recordModel.chapterModel?.id
         let rowCount = catalogView.readModel?.chapterListModels?.count ?? 0
-        let state = "\(isDayNight)|\(chapterID.map { "\($0)" } ?? "-")|\(rowCount)"
+        let state = "\(isDayNight)|\(chapterID.map { "\($0)" } ?? "-")|\(rowCount)|\(cacheStatusRevision)"
         
         if catalogReloadState != state {
             
@@ -124,6 +135,7 @@ class DZMReadLeftView: UIView,DZMSegmentedControlDelegate {
                 self?.bringSubviewToFront(self!.catalogView)
                 self?.catalogView.alpha = 1
                 self?.markView.alpha = 0
+                self?.catalogView.tableView.reloadData()
                 
             }else{ // 显示书签
                 

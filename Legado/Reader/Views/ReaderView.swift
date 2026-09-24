@@ -225,6 +225,12 @@ private struct ReaderShellView: View {
                                 }
                             }
                         }
+                        , isChapterCached: { index in
+                            ChapterCacheStore.hasNonEmptyContent(
+                                bookKey: viewModel.chapterCacheIdentifier,
+                                index: index
+                            )
+                        }
                     )
 
                     if let message = viewModel.errorMessage {
@@ -342,25 +348,7 @@ private struct ReaderShellView: View {
         }
         // Every navigation source prepares and validates the active chapter before creating
         // ReaderView. The service is still idempotent for restored sessions and retries.
-        if viewModel.currentContent == nil {
-            await viewModel.loadCurrentChapter()
-        }
-
-        // Warm a small bounded window before the user reaches the first chapter boundary. The
-        // native scroll controller still owns section insertion and pagination; this only makes
-        // its content provider hit the in-memory cache instead of starting disk/network work at
-        // the boundary.
-        let firstAdjacentIndex = viewModel.currentIndex + 1
-        let lastAdjacentIndex = min(firstAdjacentIndex + 1, viewModel.chapters.count - 1)
-        if firstAdjacentIndex <= lastAdjacentIndex {
-            Task(priority: .userInitiated) { @MainActor [weak viewModel] in
-                guard let viewModel else { return }
-                for index in firstAdjacentIndex...lastAdjacentIndex {
-                    guard !Task.isCancelled else { return }
-                    await viewModel.loadChapter(at: index)
-                }
-            }
-        }
+        await viewModel.loadCurrentChapter()
 
         ReaderSessionCache.shared.store(session)
         context = ReaderRuntimeContext(
@@ -528,6 +516,12 @@ private struct ReaderShellView: View {
             ReaderChapterListView(
                 chapters: viewModel.chapters,
                 currentIndex: paginator.chapterIndex,
+                isChapterCached: { chapter in
+                    ChapterCacheStore.hasNonEmptyContent(
+                        bookKey: viewModel.chapterCacheIdentifier,
+                        index: chapter.index
+                    )
+                },
                 onSelectChapter: { index in
                     self.route = nil
                     Task { @MainActor in

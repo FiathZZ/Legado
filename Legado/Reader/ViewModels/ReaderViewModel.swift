@@ -4,9 +4,8 @@ import SwiftData
 
 /// Visual state for the native reader's full-book cache action.
 ///
-/// The completed state is only published after every chapter has a nonempty persisted cache
-/// file. It is kept separate from the incremental chapter cache actions so the top-bar action
-/// always reflects the complete-book contract.
+/// Completion means every chapter from the current reading position to the end has a nonempty
+/// persisted body. Earlier chapters and the offline TOC manifest do not control this icon.
 enum ReaderBookCacheState: Equatable {
     case unavailable
     case available
@@ -17,7 +16,7 @@ enum ReaderBookCacheState: Equatable {
         if isDownloading {
             return .downloading
         }
-        if isEntireBookCached { return .completed }
+        if isEntireBookCached && hasCompleteTableOfContents { return .completed }
         return hasCompleteTableOfContents ? .available : .unavailable
     }
 }
@@ -89,6 +88,8 @@ final class ReaderViewModel: ObservableObject {
     var currentBookURL: String {
         bookEntity?.bookUrl ?? chapters.first?.bookUrl ?? ""
     }
+
+    var chapterCacheIdentifier: String { chapterCacheKey }
 
     var currentContent: String? {
         cachedChapters[currentIndex]?.content
@@ -207,14 +208,13 @@ final class ReaderViewModel: ObservableObject {
         await contentService.downloadChapters(from: currentIndex, count: count)
     }
 
-    /// Downloads the complete table of contents from the first chapter, regardless of where the
-    /// reader is currently positioned.
+    /// Cache the current chapter through the end, ignoring earlier chapters.
     func downloadEntireBook() async -> Bool {
         guard hasCompleteTableOfContents else {
             showUserMessage("目录未完整加载，不能缓存整本书")
             return false
         }
-        await contentService.downloadEntireBook()
+        await contentService.downloadEntireBook(from: currentIndex)
         return isEntireBookCached
     }
 

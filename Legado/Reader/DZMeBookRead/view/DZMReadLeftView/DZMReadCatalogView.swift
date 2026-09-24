@@ -28,6 +28,8 @@ class DZMReadCatalogView: UIView,UITableViewDelegate,UITableViewDataSource {
             scrollRecord()
         }
     }
+
+    var isChapterCached: ((Int) -> Bool)?
     
     private(set) var tableView:DZMTableView!
     
@@ -110,6 +112,7 @@ class DZMReadCatalogView: UIView,UITableViewDelegate,UITableViewDataSource {
         
         // 章节名
         cell.chapterName.text = readModel.chapterListModels[indexPath.row].name
+        cell.cachedMark.isHidden = !(isChapterCached?(indexPath.row) ?? false)
         
         // 日夜间
         if DZMUserDefaults.bool(DZM_READ_KEY_MODE_DAY_NIGHT) {

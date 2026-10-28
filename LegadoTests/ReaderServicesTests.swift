@@ -85,6 +85,118 @@ final class ReaderServicesTests: XCTestCase {
         ChapterCacheStore.clear(bookKey: cacheKey)
     }
 
+    func testOfflineManifestOnlyRequiresBodiesFromTheCachedStartOnward() throws {
+        let cacheKey = "offline-suffix-\(UUID().uuidString)"
+        let chapters = (0..<5).map { index in
+            BookChapter(index: index, title: "第\(index + 1)章", url: "/\(index + 1)", bookUrl: "book")
+        }
+        for index in 2..<5 {
+            try ChapterCacheStore.saveSynchronously(bookKey: cacheKey, index: index, content: "正文\(index)")
+        }
+        try ChapterCacheStore.saveOfflineBookManifest(bookKey: cacheKey, chapters: chapters, startIndex: 2)
+
+        XCTAssertEqual(ChapterCacheStore.offlineBookManifest(bookKey: cacheKey)?.startIndex, 2)
+        XCTAssertTrue(ChapterCacheStore.isOfflineBookComplete(bookKey: cacheKey))
+
+        // 起点之后缺正文才是缓存损坏；起点之前本来就不在离线承诺范围内。
+        try ChapterCacheStore.saveSynchronously(bookKey: cacheKey, index: 3, content: "")
+        XCTAssertFalse(ChapterCacheStore.isOfflineBookComplete(bookKey: cacheKey))
+        ChapterCacheStore.clear(bookKey: cacheKey)
+    }
+
+    func testLegacySuffixManifestDerivesItsCachedStartFromTheSlice() throws {
+        let slice = (2..<5).map { index in
+            BookChapter(index: index, title: "第\(index + 1)章", url: "/\(index + 1)", bookUrl: "book")
+        }
+        // 旧格式清单：只有当前章及之后的切片，也没有 startIndex 字段。
+        let legacyData = try JSONEncoder().encode(["chapters": slice])
+        let manifest = try JSONDecoder().decode(ChapterCacheStore.OfflineBookManifest.self, from: legacyData)
+
+        XCTAssertEqual(manifest.startIndex, 2)
+    }
+
+    func testOfflineRestorePadsLegacySliceSoPositionsMatchChapterFiles() throws {
+        let cacheKey = "offline-align-\(UUID().uuidString)"
+        let slice = (2..<5).map { index in
+            BookChapter(index: index, title: "第\(index + 1)章", url: "/\(index + 1)", bookUrl: "book")
+        }
+        let legacyData = try JSONEncoder().encode(["chapters": slice])
+        let manifest = try JSONDecoder().decode(ChapterCacheStore.OfflineBookManifest.self, from: legacyData)
+
+        let aligned = BookTocViewModel.alignedOfflineChapters(
+            manifest: manifest,
+            cachedToc: nil,
+            cacheKey: cacheKey,
+            bookUrl: "book"
+        )
+
+        XCTAssertFalse(aligned.hasCompleteTableOfContents)
+        XCTAssertEqual(aligned.chapters.map(\.index), [0, 1, 2, 3, 4])
+        XCTAssertEqual(aligned.chapters[2].url, "/3")
+        ChapterCacheStore.clear(bookKey: cacheKey)
+    }
+
+    func testOfflineRestoreReusesCachedTocOnlyWhenItPointsAtTheSameChapters() throws {
+        let cacheKey = "offline-align-toc-\(UUID().uuidString)"
+        let slice = (2..<5).map { index in
+            BookChapter(index: index, title: "第\(index + 1)章", url: "/\(index + 1)", bookUrl: "book")
+        }
+        let manifest = ChapterCacheStore.OfflineBookManifest(chapters: slice, startIndex: 2)
+        let fullToc = (0..<5).map { index in
+            BookChapter(index: index, title: "真实\(index + 1)", url: "/\(index + 1)", bookUrl: "book")
+        }
+
+        let reused = BookTocViewModel.alignedOfflineChapters(
+            manifest: manifest,
+            cachedToc: fullToc,
+            cacheKey: cacheKey,
+            bookUrl: "book"
+        )
+        XCTAssertTrue(reused.hasCompleteTableOfContents)
+        XCTAssertEqual(reused.chapters.map(\.title), ["真实1", "真实2", "真实3", "真实4", "真实5"])
+
+        // 目录与清单对不上时不能拿它补前缀，否则章节会串到别的正文上。
+        var shiftedToc = fullToc
+        shiftedToc[2].url = "/999"
+        let padded = BookTocViewModel.alignedOfflineChapters(
+            manifest: manifest,
+            cachedToc: shiftedToc,
+            cacheKey: cacheKey,
+            bookUrl: "book"
+        )
+        XCTAssertFalse(padded.hasCompleteTableOfContents)
+        XCTAssertEqual(padded.chapters[2].title, "第3章")
+        ChapterCacheStore.clear(bookKey: cacheKey)
+    }
+
+    func testOfflineRestoreKeepsFullLengthManifestPositionsUntouched() throws {
+        let cacheKey = "offline-align-full-\(UUID().uuidString)"
+        let chapters = (0..<5).map { index in
+            BookChapter(index: index, title: "第\(index + 1)章", url: "/\(index + 1)", bookUrl: "book")
+        }
+        let manifest = ChapterCacheStore.OfflineBookManifest(chapters: chapters, startIndex: 2)
+
+        let aligned = BookTocViewModel.alignedOfflineChapters(
+            manifest: manifest,
+            cachedToc: nil,
+            cacheKey: cacheKey,
+            bookUrl: "book"
+        )
+
+        XCTAssertTrue(aligned.hasCompleteTableOfContents)
+        XCTAssertEqual(aligned.chapters.count, 5)
+        ChapterCacheStore.clear(bookKey: cacheKey)
+    }
+
+    func testOfflineNoNetworkContractCoversOnlyTheCachedRange() {
+        XCTAssertNil(ReaderContentService.offlineLoadError(for: 1, offlineStartIndex: 2))
+        XCTAssertEqual(
+            ReaderContentService.offlineLoadError(for: 2, offlineStartIndex: 2),
+            "离线缓存不完整，请重新缓存全书"
+        )
+        XCTAssertNil(ReaderContentService.offlineLoadError(for: 4, offlineStartIndex: nil))
+    }
+
     @MainActor
     func testCachedSuffixIsCompleteFromCurrentChapterWithoutEarlierChaptersOrManifest() throws {
         let cacheKey = "cached-suffix-\(UUID().uuidString)"

@@ -11,6 +11,27 @@ struct ChapterCacheStore {
     /// cache; only this manifest means the TOC and every chapter are available offline.
     nonisolated struct OfflineBookManifest: Codable, Sendable {
         let chapters: [BookChapter]
+        /// 离线可读区间的第一章（绝对章节号）。「全部缓存」只缓存当前章及之后，当前章之前的
+        /// 章节被有意排除，所以完整性判定必须从这个位置开始。
+        let startIndex: Int
+
+        init(chapters: [BookChapter], startIndex: Int) {
+            self.chapters = chapters
+            self.startIndex = max(0, startIndex)
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case chapters, startIndex
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            let decodedChapters = try container.decode([BookChapter].self, forKey: .chapters)
+            // 旧版清单不落盘 startIndex：当时写入的切片本身就是从缓存起点开始的。
+            let decodedStart = try container.decodeIfPresent(Int.self, forKey: .startIndex)
+                ?? (decodedChapters.map { $0.index }.min() ?? 0)
+            self.init(chapters: decodedChapters, startIndex: decodedStart)
+        }
     }
 
     nonisolated static func content(bookKey: String, index: Int) -> String? {
@@ -39,9 +60,16 @@ struct ChapterCacheStore {
         return try? JSONDecoder().decode(OfflineBookManifest.self, from: data)
     }
 
-    nonisolated static func saveOfflineBookManifest(bookKey: String, chapters: [BookChapter]) throws {
+    nonisolated static func saveOfflineBookManifest(
+        bookKey: String,
+        chapters: [BookChapter],
+        startIndex: Int = 0
+    ) throws {
         guard !chapters.isEmpty else { return }
-        let manifest = OfflineBookManifest(chapters: chapters.map(Self.sanitizedChapter))
+        let manifest = OfflineBookManifest(
+            chapters: chapters.map(Self.sanitizedChapter),
+            startIndex: startIndex
+        )
         let data = try JSONEncoder().encode(manifest)
         try withWriteLock {
             try persist(data: data, to: offlineManifestFileURL(bookKey: bookKey))
@@ -63,8 +91,9 @@ struct ChapterCacheStore {
         guard let manifest = offlineBookManifest(bookKey: bookKey), !manifest.chapters.isEmpty else {
             return false
         }
+        // 缓存起点之前的章节从未被下载，不属于离线承诺的范围。
         return manifest.chapters.allSatisfy {
-            hasNonEmptyContent(bookKey: bookKey, index: $0.index)
+            $0.index < manifest.startIndex || hasNonEmptyContent(bookKey: bookKey, index: $0.index)
         }
     }
 

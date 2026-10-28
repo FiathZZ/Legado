@@ -30,7 +30,10 @@ final class ReaderContentService: ObservableObject {
     private var currentIndex: Int
     private let modelContext: ModelContext?
     private var cachedContentReplaceRules: [ReplaceRule]?
-    private var isOfflineBook: Bool
+    /// 离线清单保证联网可用的第一章（绝对章节号）。为 nil 表示这本书不是离线书，任何章节都可以
+    /// 走网络。清单区间内的章节缺失正文必须报错，区间外的章节本来就没被缓存，按正常路径加载。
+    private var offlineStartIndex: Int?
+    private var isOfflineBook: Bool { offlineStartIndex != nil }
     private var chapterLoadWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
     private var cancellables = Set<AnyCancellable>()
     private var prefetchTask: Task<Void, Never>?
@@ -53,7 +56,7 @@ final class ReaderContentService: ObservableObject {
         self.modelContext = modelContext
         // The manifest opts this book into offline-only reading. Completeness controls the UI
         // checkmark separately; a damaged package must not fall back to network.
-        self.isOfflineBook = ChapterCacheStore.offlineBookManifest(bookKey: chapterCacheKey) != nil
+        self.offlineStartIndex = ChapterCacheStore.offlineBookManifest(bookKey: chapterCacheKey)?.startIndex
         self.isEntireBookCached = Self.hasPersistedEntireBook(
             chapterCount: chapters.count,
             startingAt: self.currentIndex,
@@ -122,8 +125,8 @@ final class ReaderContentService: ObservableObject {
 
         // A completed offline manifest is an explicit no-network contract. A damaged cache
         // must report its problem instead of silently consuming mobile data to repair itself.
-        if isOfflineBook {
-            cachedChapters[index] = CachedChapter(chapter: chapter, error: "离线缓存不完整，请重新缓存全书")
+        if let offlineError = Self.offlineLoadError(for: index, offlineStartIndex: offlineStartIndex) {
+            cachedChapters[index] = CachedChapter(chapter: chapter, error: offlineError)
             return
         }
 
@@ -244,7 +247,7 @@ final class ReaderContentService: ObservableObject {
 
         let chapterCount = chapters.count
         let cacheKey = chapterCacheKey
-        let manifestChapters = Array(chapters[start...])
+        let offlineChapters = chapters
         let cacheStart = start
         let completed = await Task.detached(priority: .utility) {
             Self.hasPersistedEntireBook(
@@ -255,10 +258,16 @@ final class ReaderContentService: ObservableObject {
         }.value
         if completed {
             do {
-                try ChapterCacheStore.saveOfflineBookManifest(bookKey: cacheKey, chapters: manifestChapters)
-                isOfflineBook = ChapterCacheStore.isOfflineBookComplete(bookKey: cacheKey)
+                // 清单保存完整目录，只把缓存起点记成当前章。正文文件按绝对章节号命名，而恢复时
+                // 目录会被当作从 0 开始的数组使用，存切片会让两者整体错位 `start`。
+                try ChapterCacheStore.saveOfflineBookManifest(
+                    bookKey: cacheKey,
+                    chapters: offlineChapters,
+                    startIndex: cacheStart
+                )
+                offlineStartIndex = ChapterCacheStore.isOfflineBookComplete(bookKey: cacheKey) ? start : nil
             } catch {
-                isOfflineBook = false
+                offlineStartIndex = nil
             }
         }
         refreshCacheStatus(from: currentIndex)
@@ -317,7 +326,7 @@ final class ReaderContentService: ObservableObject {
         prefetchAnchor = nil
         ChapterCacheStore.clear(bookKey: chapterCacheKey)
         cachedChapters = [:]
-        isOfflineBook = false
+        offlineStartIndex = nil
         isEntireBookCached = false
     }
 
@@ -660,6 +669,13 @@ final class ReaderContentService: ObservableObject {
     ) -> [Int] {
         guard start >= 0, end >= start else { return [] }
         return (start...end).filter { !cachedIndices.contains($0) }
+    }
+
+    /// 离线清单只保证缓存起点及其之后的章节免联网。起点之前的章节从未被缓存，返回 nil 让调用方
+    /// 走正常加载路径，而不是把它们也判成「缓存不完整」。
+    nonisolated static func offlineLoadError(for index: Int, offlineStartIndex: Int?) -> String? {
+        guard let offlineStartIndex, index >= offlineStartIndex else { return nil }
+        return "离线缓存不完整，请重新缓存全书"
     }
 
     nonisolated static func hasPersistedEntireBook(

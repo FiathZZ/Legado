@@ -100,13 +100,17 @@ final class BookTocViewModel: ObservableObject {
         }.value
 
         switch result {
-        case .offlineManifest(let restored):
+        case .offlineManifest(let restored, let hasCompleteToc):
             // A completed offline cache owns both TOC and content. Never refresh it in the
             // background: opening a downloaded book must consume zero network traffic.
             chapters = restored
-            hasCompleteTableOfContents = true
+            hasCompleteTableOfContents = hasCompleteToc
             syncChapterCount()
             errorMessage = nil
+            if !hasCompleteToc, !LocalBookSupport.isLocalSource(source.bookSourceUrl) {
+                // 前缀章节只是占位条目，联网补齐真实目录后才能正常向前翻页与再次缓存。
+                refreshCachedTocInBackground(generation: tocLoadGeneration)
+            }
             return true
 
         case .cachedToc(let restored, let cachedAt):
@@ -336,14 +340,24 @@ final class BookTocViewModel: ObservableObject {
     /// Resolves the restore outcome entirely off the main actor. Every input is a value type and
     /// every store call it makes is `nonisolated`, so this never touches UI state.
     nonisolated private static func resolveRestore(_ request: TocRestoreRequest) -> TocRestoreResult {
+        let cachedTocChapters = decodedCachedToc(request.tocJson)
+
         if let manifest = ChapterCacheStore.offlineBookManifest(bookKey: request.cacheKey) {
-            return .offlineManifest(manifest.chapters)
+            // 旧版清单只存了「当前章及之后」的切片，而正文文件名是绝对章节号、目录又被当作从 0
+            // 开始的数组使用。先把目录补齐到第 0 章，否则每个缓存文件都会整体错位缓存起点。
+            let aligned = alignedOfflineChapters(
+                manifest: manifest,
+                cachedToc: cachedTocChapters,
+                cacheKey: request.cacheKey,
+                bookUrl: request.bookUrl
+            )
+            return .offlineManifest(
+                chapters: expandedThroughPersistedCache(aligned.chapters, request: request),
+                hasCompleteTableOfContents: aligned.hasCompleteTableOfContents
+            )
         }
 
-        if let json = request.tocJson,
-           let data = json.data(using: .utf8),
-           let decoded = try? JSONDecoder().decode([BookChapter].self, from: data),
-           !decoded.isEmpty {
+        if let decoded = cachedTocChapters {
             // Migrate an older complete body cache when its durable TOC is still available.
             // Once promoted, every later reader and TOC entry is offline-only.
             if decoded.allSatisfy({
@@ -353,7 +367,7 @@ final class BookTocViewModel: ObservableObject {
                     bookKey: request.cacheKey,
                     chapters: decoded
                 )
-                return .offlineManifest(decoded)
+                return .offlineManifest(chapters: decoded, hasCompleteTableOfContents: true)
             }
             return .cachedToc(
                 chapters: expandedThroughPersistedCache(decoded, request: request),
@@ -363,6 +377,65 @@ final class BookTocViewModel: ObservableObject {
 
         guard let fallback = fallbackChapters(request) else { return .unavailable }
         return .fallback(chapters: expandedThroughPersistedCache(fallback, request: request))
+    }
+
+    private nonisolated static func decodedCachedToc(_ json: String?) -> [BookChapter]? {
+        guard let json,
+              let data = json.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([BookChapter].self, from: data),
+              !decoded.isEmpty else {
+            return nil
+        }
+        return decoded
+    }
+
+    nonisolated static func alignedOfflineChapters(
+        manifest: ChapterCacheStore.OfflineBookManifest,
+        cachedToc: [BookChapter]?,
+        cacheKey: String,
+        bookUrl: String
+    ) -> (chapters: [BookChapter], hasCompleteTableOfContents: Bool) {
+        let offline = manifest.chapters.sorted { $0.index < $1.index }
+        guard let firstOffline = offline.first, firstOffline.index > 0 else {
+            return (offline, true)
+        }
+
+        // 目录缓存能提供前缀的真实标题与链接，但只有它确实指向同一批章节时才能替换清单。
+        if let cachedToc, cachedToc.indices.contains(firstOffline.index),
+           cachedToc[firstOffline.index].url == firstOffline.url {
+            return (cachedToc, true)
+        }
+
+        let prefix = (0..<firstOffline.index).map { index in
+            restoredChapter(index: index, cacheKey: cacheKey, bookUrl: bookUrl, titleFallback: nil)
+        }
+        return (prefix + offline, false)
+    }
+
+    /// 只剩 `N.meta` 的章节用它重建目录条目，没有元信息时以 `titleFallback` 或序号标题占位。
+    nonisolated private static func restoredChapter(
+        index: Int,
+        cacheKey: String,
+        bookUrl: String,
+        titleFallback: String?
+    ) -> BookChapter {
+        let metadata = ChapterCacheStore.chapterMetadata(bookKey: cacheKey, index: index)
+        return BookChapter(
+            index: index,
+            title: metadata?.title ?? titleFallback ?? "第\(index + 1)章",
+            url: metadata?.url ?? "",
+            baseUrl: metadata?.baseUrl ?? "",
+            bookUrl: (metadata?.bookUrl.isEmpty == false ? metadata?.bookUrl : nil) ?? bookUrl,
+            isVolume: metadata?.isVolume ?? false,
+            isVip: metadata?.isVip ?? false,
+            isPay: metadata?.isPay ?? false,
+            updateTime: metadata?.updateTime,
+            wordCount: metadata?.wordCount,
+            sourceVariables: metadata?.sourceVariables ?? [:],
+            bookVariables: metadata?.bookVariables ?? [:],
+            chapterVariables: metadata?.chapterVariables ?? [:],
+            variables: metadata?.variables ?? [:]
+        )
     }
 
     /// Rebuilds the complete offline range from persisted chapter files. The old fallback
@@ -377,24 +450,11 @@ final class BookTocViewModel: ObservableObject {
 
         let lastIndex = cachedIndices.max() ?? request.fallbackIndex
         return (0...lastIndex).map { index in
-            let metadata = ChapterCacheStore.chapterMetadata(bookKey: request.cacheKey, index: index)
-            return BookChapter(
+            restoredChapter(
                 index: index,
-                title: metadata?.title ?? (index == request.fallbackIndex
-                    ? (request.fallbackName ?? "第\(index + 1)章")
-                    : "第\(index + 1)章"),
-                url: metadata?.url ?? "",
-                baseUrl: metadata?.baseUrl ?? "",
-                bookUrl: (metadata?.bookUrl.isEmpty == false ? metadata?.bookUrl : nil) ?? request.bookUrl,
-                isVolume: metadata?.isVolume ?? false,
-                isVip: metadata?.isVip ?? false,
-                isPay: metadata?.isPay ?? false,
-                updateTime: metadata?.updateTime,
-                wordCount: metadata?.wordCount,
-                sourceVariables: metadata?.sourceVariables ?? [:],
-                bookVariables: metadata?.bookVariables ?? [:],
-                chapterVariables: metadata?.chapterVariables ?? [:],
-                variables: metadata?.variables ?? [:]
+                cacheKey: request.cacheKey,
+                bookUrl: request.bookUrl,
+                titleFallback: index == request.fallbackIndex ? request.fallbackName : nil
             )
         }
     }
@@ -525,7 +585,9 @@ private struct TocRestoreRequest: Sendable {
 
 /// Outcome of the off-main restore. The main actor only applies this; it never inspects the disk.
 private enum TocRestoreResult: Sendable {
-    case offlineManifest([BookChapter])
+    /// `hasCompleteTableOfContents` 为 false 表示离线清单是旧式的「当前章及之后」切片，且没有
+    /// 可用的目录缓存来补齐它之前的章节，前缀条目只是占位，需要后台刷新真实目录。
+    case offlineManifest(chapters: [BookChapter], hasCompleteTableOfContents: Bool)
     case cachedToc(chapters: [BookChapter], cachedAt: Date)
     case fallback(chapters: [BookChapter])
     case unavailable
